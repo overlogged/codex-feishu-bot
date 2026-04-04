@@ -54,7 +54,7 @@ After Feishu console setup:
 
 ```bash
 pnpm codex:host
-pnpm build
+pnpm build:host
 pnpm start
 pnpm host:smoke
 ```

@@ -17,7 +17,7 @@ Set up and deploy a Feishu bot backed by `codex app-server` with as little manua
 7. Use browser automation through Chrome CDP to configure Feishu Open Platform.
 8. Persist discovered values into `.env.real`.
 9. Start external Codex with `pnpm codex:host`.
-10. Build the app with `pnpm build`.
+10. Build the app with `pnpm build:host`.
 11. Start the bot process with `pnpm start`.
 12. Verify with `pnpm host:smoke`.
 

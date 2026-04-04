@@ -117,12 +117,50 @@ flowchart LR
 
 ```bash
 pnpm codex:host
-pnpm build
+pnpm build:host
 pnpm start
 pnpm host:smoke
 ```
 
 默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的子目录，不能直接把仓库根目录当运行工作区。
+
+## 后台运行
+
+最直接的后台方式是各起一个宿主机进程：
+
+```bash
+nohup pnpm codex:host > /tmp/codex-feishu-bot-codex.log 2>&1 &
+nohup pnpm start > /tmp/codex-feishu-bot-app.log 2>&1 &
+pnpm host:smoke
+```
+
+如果只是临时跑，这已经够用；但长期运行更推荐 `systemd --user`。
+
+## User Service
+
+仓库里提供了 user service 安装脚本：
+
+```bash
+pnpm service:install:user
+systemctl --user enable --now codex-feishu-bot-codex.service
+systemctl --user enable --now codex-feishu-bot-app.service
+pnpm host:smoke
+```
+
+常用运维命令：
+
+```bash
+systemctl --user status codex-feishu-bot-app.service
+systemctl --user restart codex-feishu-bot-app.service
+journalctl --user -u codex-feishu-bot-app.service -f
+journalctl --user -u codex-feishu-bot-codex.service -f
+```
+
+如果你希望退出登录后服务继续运行，再执行：
+
+```bash
+loginctl enable-linger "$USER"
+```
 
 ## 环境变量
 
