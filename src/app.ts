@@ -22,6 +22,7 @@ import { registerDebugRoutes } from "./routes/debug.js";
 import { registerFeishuRoutes } from "./routes/feishu.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { ChatOrchestrator } from "./services/chat-orchestrator.js";
+import { FileBackedChatWorkspaceResolver } from "./services/chat-workspace-resolver.js";
 import { ConversationDeliveryService } from "./services/conversation-delivery-service.js";
 import { MessageProjector } from "./services/message-projector.js";
 import { ConversationStore } from "./stores/conversation-store.js";
@@ -84,6 +85,11 @@ export function buildAppRuntime(env: Env): AppRuntime {
     conversationStore
   });
   const feishuClient = buildFeishuMessageClient(env, app.log);
+  const workspaceResolver = new FileBackedChatWorkspaceResolver(
+    env.DEFAULT_WORKSPACE,
+    env.CHAT_WORKSPACE_BINDINGS_FILE,
+    app.log
+  );
   const deliveryService = new ConversationDeliveryService(
     feishuClient,
     conversationStore,
@@ -96,9 +102,11 @@ export function buildAppRuntime(env: Env): AppRuntime {
     sessionStore,
     runStore,
     conversationStore,
+    feishuClient,
     deliveryService,
     projector,
     codexWorker,
+    workspaceResolver,
     env.DEFAULT_WORKSPACE,
     app.log
   );

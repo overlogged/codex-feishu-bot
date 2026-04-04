@@ -1,8 +1,10 @@
-import type { IncomingChatMessage } from "../domain/types.js";
+import type { ChatSession, IncomingChatMessage } from "../domain/types.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
+import type { FeishuMessageClient } from "../integrations/feishu/feishu-message-client.js";
 import { ConversationStore } from "../stores/conversation-store.js";
 import { RunStore } from "../stores/run-store.js";
 import { SessionStore } from "../stores/session-store.js";
+import type { ChatWorkspaceResolver } from "./chat-workspace-resolver.js";
 import { ConversationDeliveryService } from "./conversation-delivery-service.js";
 import { MessageProjector } from "./message-projector.js";
 
@@ -19,9 +21,11 @@ export class ChatOrchestrator {
     private readonly sessionStore: SessionStore,
     private readonly runStore: RunStore,
     private readonly conversationStore: ConversationStore,
+    private readonly feishuClient: FeishuMessageClient,
     private readonly deliveryService: ConversationDeliveryService,
     private readonly projector: MessageProjector,
     private readonly codexWorker: CodexWorker,
+    private readonly workspaceResolver: ChatWorkspaceResolver,
     private readonly defaultWorkspace: string,
     private readonly logger: LoggerLike
   ) {}
@@ -64,22 +68,54 @@ export class ChatOrchestrator {
       "收到飞书消息，准备进入编排处理"
     );
 
+    void this.processIncomingMessage(message);
+  }
+
+  private async processIncomingMessage(message: IncomingChatMessage): Promise<void> {
     const existingSession = this.sessionStore.get(message.chatId);
-    if (existingSession?.activeRunId && this.codexWorker.steerTurn) {
-      void this.dispatchActiveOrNew(existingSession, message);
+    const workspaceResolution = await this.workspaceResolver.resolve({
+      message,
+      session: existingSession
+    });
+
+    if (!workspaceResolution.ok) {
+      this.logger.warn(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          chatType: message.chatType,
+          reason: workspaceResolution.reason,
+          configuredWorkspace: workspaceResolution.configuredWorkspace,
+          resolvedWorkspace: workspaceResolution.resolvedWorkspace,
+          configFilePath: workspaceResolution.configFilePath
+        },
+        "群消息未命中有效工作区配置，已拒绝启动任务"
+      );
+      await this.notifyWorkspaceRequirement(message, workspaceResolution.detail);
       return;
     }
 
-    void this.handleMessage(message);
+    if (
+      existingSession?.activeRunId &&
+      this.codexWorker.steerTurn &&
+      existingSession.workspaceId === workspaceResolution.workspaceId
+    ) {
+      await this.dispatchActiveOrNew(existingSession, message, workspaceResolution.workspaceId);
+      return;
+    }
+
+    await this.handleMessage(message, workspaceResolution.workspaceId);
   }
 
-  private async handleMessage(message: IncomingChatMessage): Promise<void> {
+  private async handleMessage(message: IncomingChatMessage, workspaceId?: string): Promise<void> {
     const existingSession = this.sessionStore.get(message.chatId);
-    const workspaceId = existingSession?.workspaceId ?? this.defaultWorkspace;
-    const threadId = existingSession
+    const resolvedWorkspaceId = workspaceId ?? existingSession?.workspaceId ?? this.defaultWorkspace;
+    const reusableSession =
+      existingSession?.workspaceId === resolvedWorkspaceId ? existingSession : undefined;
+    const threadId = reusableSession
       ? await this.codexWorker.ensureThread({
-          session: existingSession,
-          workspaceId,
+          session: reusableSession,
+          workspaceId: resolvedWorkspaceId,
           message
         })
       : `pending:${message.chatId}:${Date.now()}`;
@@ -87,8 +123,9 @@ export class ChatOrchestrator {
     this.sessionStore.save({
       chatId: message.chatId,
       threadId,
-      workspaceId,
-      activeRunId: existingSession?.activeRunId,
+      workspaceId: resolvedWorkspaceId,
+      activeRunId: reusableSession?.activeRunId,
+      activeTurnId: reusableSession?.activeTurnId,
       updatedAt: new Date().toISOString()
     });
 
@@ -103,7 +140,7 @@ export class ChatOrchestrator {
     try {
       for await (const event of this.codexWorker.runTurn({
         session: this.sessionStore.get(message.chatId),
-        workspaceId,
+        workspaceId: resolvedWorkspaceId,
         message,
         threadId
       })) {
@@ -116,7 +153,7 @@ export class ChatOrchestrator {
         this.sessionStore.save({
           chatId: message.chatId,
           threadId: result.run.threadId,
-          workspaceId,
+          workspaceId: resolvedWorkspaceId,
           activeRunId: run.runId,
           activeTurnId: this.sessionStore.get(message.chatId)?.activeTurnId,
           updatedAt: new Date().toISOString()
@@ -222,7 +259,8 @@ export class ChatOrchestrator {
 
   private async dispatchActiveOrNew(
     initialSession: ReturnType<SessionStore["get"]>,
-    message: IncomingChatMessage
+    message: IncomingChatMessage,
+    workspaceId: string
   ): Promise<void> {
     let session = initialSession;
 
@@ -240,7 +278,7 @@ export class ChatOrchestrator {
       session = this.sessionStore.get(message.chatId);
     }
 
-    await this.handleMessage(message);
+    await this.handleMessage(message, workspaceId);
   }
 
   getDebugState() {
@@ -268,5 +306,23 @@ export class ChatOrchestrator {
 
     this.seenIncomingMessages.set(key, now);
     return false;
+  }
+
+  private async notifyWorkspaceRequirement(message: IncomingChatMessage, content: string): Promise<void> {
+    try {
+      await this.feishuClient.sendText({
+        chatId: message.chatId,
+        content
+      });
+    } catch (error) {
+      this.logger.error(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "发送工作区配置提示失败"
+      );
+    }
   }
 }

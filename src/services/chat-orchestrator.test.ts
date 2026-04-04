@@ -3,9 +3,11 @@ import test from "node:test";
 
 import type { CodexEvent, ConversationItem, IncomingChatMessage } from "../domain/types.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
+import type { FeishuMessageClient } from "../integrations/feishu/feishu-message-client.js";
 import { ConversationStore } from "../stores/conversation-store.js";
 import { RunStore } from "../stores/run-store.js";
 import { SessionStore } from "../stores/session-store.js";
+import type { ChatWorkspaceResolver } from "./chat-workspace-resolver.js";
 import { ChatOrchestrator } from "./chat-orchestrator.js";
 import { MessageProjector } from "./message-projector.js";
 
@@ -34,6 +36,44 @@ function createLogger() {
     },
     error() {
       return undefined;
+    }
+  };
+}
+
+function createFeishuClient(overrides: Partial<FeishuMessageClient> = {}): FeishuMessageClient {
+  return {
+    async sendText() {
+      return "om_text_1";
+    },
+    async updateText() {
+      return undefined;
+    },
+    async sendCard() {
+      return "om_card_1";
+    },
+    async updateCard() {
+      return undefined;
+    },
+    async sendFile() {
+      return "om_file_1";
+    },
+    ...overrides
+  };
+}
+
+function createWorkspaceResolver(
+  resolveImpl?: ChatWorkspaceResolver["resolve"]
+): ChatWorkspaceResolver {
+  return {
+    async resolve(input) {
+      if (resolveImpl) {
+        return resolveImpl(input);
+      }
+
+      return {
+        ok: true,
+        workspaceId: input.session?.workspaceId ?? "/workspace"
+      };
     }
   };
 }
@@ -82,6 +122,7 @@ test("ChatOrchestrator accepts group messages without mentions", async () => {
     sessionStore,
     runStore,
     conversationStore,
+    createFeishuClient(),
     {
       schedule(item: ConversationItem) {
         scheduledItemIds.push(item.itemId);
@@ -92,6 +133,7 @@ test("ChatOrchestrator accepts group messages without mentions", async () => {
     } as never,
     projector,
     codexWorker,
+    createWorkspaceResolver(),
     "/workspace",
     createLogger()
   );
@@ -154,6 +196,7 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
     sessionStore,
     runStore,
     conversationStore,
+    createFeishuClient(),
     {
       schedule() {
         return undefined;
@@ -164,6 +207,7 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
     } as never,
     projector,
     codexWorker,
+    createWorkspaceResolver(),
     "/workspace",
     createLogger()
   );
@@ -208,6 +252,7 @@ test("ChatOrchestrator ignores app-sent group messages to avoid loops", async ()
     sessionStore,
     runStore,
     conversationStore,
+    createFeishuClient(),
     {
       schedule() {
         return undefined;
@@ -218,6 +263,7 @@ test("ChatOrchestrator ignores app-sent group messages to avoid loops", async ()
     } as never,
     projector,
     codexWorker,
+    createWorkspaceResolver(),
     "/workspace",
     createLogger()
   );
@@ -282,6 +328,7 @@ test("ChatOrchestrator ignores duplicated incoming message ids", async () => {
     sessionStore,
     runStore,
     conversationStore,
+    createFeishuClient(),
     {
       schedule() {
         return undefined;
@@ -292,6 +339,7 @@ test("ChatOrchestrator ignores duplicated incoming message ids", async () => {
     } as never,
     projector,
     codexWorker,
+    createWorkspaceResolver(),
     "/workspace",
     createLogger()
   );
@@ -310,4 +358,61 @@ test("ChatOrchestrator ignores duplicated incoming message ids", async () => {
   assert.equal(runTurnCalls, 1);
   assert.equal(runStore.list().length, 1);
   assert.equal(conversationStore.list().length, 1);
+});
+
+test("ChatOrchestrator rejects group messages when workspace is not configured", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  let runTurnCalls = 0;
+  const sentTexts: string[] = [];
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_config_required";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver(async () => ({
+      ok: false,
+      reason: "group_workspace_unconfigured",
+      configFilePath: "/workspace/.codex-feishu-bot/chat-workspaces.json",
+      chatId: "oc_group_1",
+      detail: "请先配置工作区"
+    })),
+    "/workspace",
+    createLogger()
+  );
+
+  orchestrator.enqueue(createMessage());
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(runStore.list().length, 0);
+  assert.deepEqual(sentTexts, ["请先配置工作区"]);
 });

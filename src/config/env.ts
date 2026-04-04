@@ -50,6 +50,7 @@ const envSchema = z.object({
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .default("danger-full-access"),
   DEFAULT_WORKSPACE: z.string().default(process.cwd()),
+  CHAT_WORKSPACE_BINDINGS_FILE: z.string().default(".codex-feishu-bot/chat-workspaces.json"),
   CODEX_ARTIFACTS_DIR: z.string().default(".codex-local/artifacts"),
   RUNTIME_STATE_FILE: z.string().default(".codex-feishu-bot/runtime-state.json"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
@@ -76,6 +77,7 @@ export function readEnv(): Env {
   return {
     ...parsed,
     DEFAULT_WORKSPACE: defaultWorkspace,
+    CHAT_WORKSPACE_BINDINGS_FILE: resolveDir(defaultWorkspace, parsed.CHAT_WORKSPACE_BINDINGS_FILE),
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
     RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE)
   };
