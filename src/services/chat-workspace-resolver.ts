@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import type { IncomingChatMessage, ChatSession } from "../domain/types.js";
 
@@ -62,12 +62,17 @@ function renderExample(chatId: string): string {
   return JSON.stringify(
     {
       [chatId]: {
-        workspace: "/workspace/projects/example"
+        workspace: "overlogged/projects/example"
       }
     },
     null,
     2
   );
+}
+
+function isWithinWorkspaceRoot(workspaceRoot: string, resolvedWorkspace: string): boolean {
+  const relativePath = relative(workspaceRoot, resolvedWorkspace);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
@@ -158,6 +163,21 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     const resolvedWorkspace = isAbsolute(configuredWorkspace)
       ? configuredWorkspace
       : resolve(this.defaultWorkspace, configuredWorkspace);
+
+    if (!isWithinWorkspaceRoot(this.defaultWorkspace, resolvedWorkspace)) {
+      return {
+        ok: false,
+        reason: "group_workspace_invalid",
+        configFilePath: this.configFilePath,
+        chatId: message.chatId,
+        configuredWorkspace,
+        resolvedWorkspace,
+        detail: [
+          `这个群配置的工作区是 ${resolvedWorkspace}，但它不在映射根 ${this.defaultWorkspace} 下面，任务不会启动。`,
+          `请把 ${this.configFilePath} 里的 workspace 改成 ${this.defaultWorkspace} 下的子目录后再重试。`
+        ].join("\n")
+      };
+    }
 
     try {
       const workspaceStat = await stat(resolvedWorkspace);

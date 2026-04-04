@@ -61,7 +61,7 @@ test("FileBackedChatWorkspaceResolver rejects group messages when configured wor
     configFilePath,
     JSON.stringify({
       oc_group_1: {
-        workspace: "/workspace/projects/missing"
+        workspace: "projects/missing"
       }
     }),
     "utf8"
@@ -78,6 +78,35 @@ test("FileBackedChatWorkspaceResolver rejects group messages when configured wor
   }
   assert.equal(result.reason, "group_workspace_missing");
   assert.match(result.detail, /目录不存在/);
+});
+
+test("FileBackedChatWorkspaceResolver rejects group messages when configured workspace is outside root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(join(workspaceRoot, ".codex-feishu-bot"), { recursive: true });
+  await writeFile(
+    configFilePath,
+    JSON.stringify({
+      oc_group_1: {
+        workspace: "/tmp/outside-root"
+      }
+    }),
+    "utf8"
+  );
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.resolve({
+    message: createMessage()
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected outside-root workspace resolution to fail");
+  }
+  assert.equal(result.reason, "group_workspace_invalid");
+  assert.match(result.detail, /映射根/);
 });
 
 test("FileBackedChatWorkspaceResolver allows direct messages to use the default workspace", async () => {

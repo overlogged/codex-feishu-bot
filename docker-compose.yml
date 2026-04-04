@@ -11,6 +11,7 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       DEFAULT_WORKSPACE: /workspace
+      CHAT_WORKSPACE_BINDINGS_FILE: ${CHAT_WORKSPACE_BINDINGS_FILE:-/workspace/.codex-feishu-bot/chat-workspaces.json}
       CODEX_ARTIFACTS_DIR: ${CODEX_ARTIFACTS_DIR:-/workspace/artifacts}
       RUNTIME_STATE_FILE: ${RUNTIME_STATE_FILE:-/workspace/.codex-feishu-bot/runtime-state.json}
       LIVE_UPDATE_DEBOUNCE_MS: ${LIVE_UPDATE_DEBOUNCE_MS:-1200}
