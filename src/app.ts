@@ -6,8 +6,11 @@ import type { FastifyInstance } from "fastify";
 
 import type { Env } from "./config/env.js";
 import { CodexAppServerWorker } from "./integrations/codex/app-server-worker.js";
+import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
+import { KimiCliWorker } from "./integrations/codex/kimi-cli-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
+import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
 import { FakeFeishuMessageClient } from "./integrations/feishu/fake-feishu-message-client.js";
 import { FakeFeishuWsSubscriber } from "./integrations/feishu/fake-feishu-ws-subscriber.js";
 import {
@@ -21,13 +24,16 @@ import { FeishuWsSubscriber } from "./integrations/feishu/feishu-ws-subscriber.j
 import { registerDebugRoutes } from "./routes/debug.js";
 import { registerFeishuRoutes } from "./routes/feishu.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { ChatScheduleService } from "./services/chat-schedule-service.js";
 import { ChatOrchestrator } from "./services/chat-orchestrator.js";
+import { CodexGroupControlAgent } from "./services/group-control-agent.js";
 import { FileBackedChatWorkspaceResolver } from "./services/chat-workspace-resolver.js";
 import { ConversationDeliveryService } from "./services/conversation-delivery-service.js";
 import { MessageProjector } from "./services/message-projector.js";
 import { ConversationStore } from "./stores/conversation-store.js";
 import { RunStore } from "./stores/run-store.js";
 import { RuntimeStatePersister } from "./stores/runtime-state-persister.js";
+import { ScheduledTaskStore } from "./stores/scheduled-task-store.js";
 import { SessionStore } from "./stores/session-store.js";
 
 interface LoggerLike {
@@ -38,7 +44,11 @@ interface LoggerLike {
 
 function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
   if (env.CODEX_MODE === "app-server") {
-    return new CodexAppServerWorker(env, logger);
+    return new MultiCliWorker({
+      codex: new CodexAppServerWorker(env, logger),
+      claude: new ClaudeCliWorker(env, logger),
+      kimi: new KimiCliWorker(env, logger)
+    });
   }
 
   return new MockCodexWorker();
@@ -74,15 +84,18 @@ export function buildAppRuntime(env: Env): AppRuntime {
   let sessionStore: SessionStore;
   let runStore: RunStore;
   let conversationStore: ConversationStore;
+  let scheduledTaskStore: ScheduledTaskStore;
   const persistRuntimeState = () => runtimeStatePersister.scheduleSave();
 
   sessionStore = new SessionStore(persistRuntimeState);
   runStore = new RunStore(persistRuntimeState);
   conversationStore = new ConversationStore(persistRuntimeState);
+  scheduledTaskStore = new ScheduledTaskStore(persistRuntimeState);
   runtimeStatePersister.attach({
     sessionStore,
     runStore,
-    conversationStore
+    conversationStore,
+    scheduledTaskStore
   });
   const feishuClient = buildFeishuMessageClient(env, app.log);
   const workspaceResolver = new FileBackedChatWorkspaceResolver(
@@ -96,8 +109,14 @@ export function buildAppRuntime(env: Env): AppRuntime {
     env.LIVE_UPDATE_DEBOUNCE_MS,
     app.log
   );
+  const scheduleService = new ChatScheduleService(scheduledTaskStore, app.log);
   const projector = new MessageProjector(runStore, conversationStore);
   const codexWorker = buildCodexWorker(env, app.log);
+  const groupControlAgent = new CodexGroupControlAgent(
+    codexWorker,
+    env.DEFAULT_WORKSPACE,
+    app.log
+  );
   const orchestrator = new ChatOrchestrator(
     sessionStore,
     runStore,
@@ -107,8 +126,10 @@ export function buildAppRuntime(env: Env): AppRuntime {
     projector,
     codexWorker,
     workspaceResolver,
+    scheduleService,
     env.DEFAULT_WORKSPACE,
-    app.log
+    app.log,
+    groupControlAgent
   );
 
   void registerHealthRoutes(app);
@@ -152,7 +173,8 @@ export function buildAppRuntime(env: Env): AppRuntime {
       const restored = await runtimeStatePersister.restore({
         sessionStore,
         runStore,
-        conversationStore
+        conversationStore,
+        scheduledTaskStore
       });
       await runtimeStatePersister.flush();
 
@@ -170,11 +192,13 @@ export function buildAppRuntime(env: Env): AppRuntime {
           hasFeishuCredentials: hasFeishuCredentials(env),
           defaultWorkspace: env.DEFAULT_WORKSPACE,
           codexArtifactsDir: env.CODEX_ARTIFACTS_DIR,
-          runtimeStateFile: env.RUNTIME_STATE_FILE
+          runtimeStateFile: env.RUNTIME_STATE_FILE,
+          scheduledTasks: scheduledTaskStore.list().length
         },
         "应用启动配置摘要"
       );
       await codexWorker.start?.();
+      scheduleService.start((task) => orchestrator.triggerScheduledTask(task));
 
       if (restored.interruptedRuns.length > 0) {
         const interruptedByChat = new Map<string, number>();
@@ -227,6 +251,7 @@ export function buildAppRuntime(env: Env): AppRuntime {
     },
     async stopExternalServices() {
       await wsSubscriber?.close();
+      scheduleService.stop();
       await codexWorker.close?.();
       await runtimeStatePersister.flush();
     }

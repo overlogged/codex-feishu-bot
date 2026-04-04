@@ -71,6 +71,50 @@ test("FeishuSdkMessageClient sends text message with JSON payload", async () => 
   });
 });
 
+test("FeishuSdkMessageClient replies in thread when reply target is provided", async () => {
+  let replyPayload: unknown;
+
+  const client = new FeishuSdkMessageClient(
+    {
+      im: {
+        v1: {
+          message: {
+            reply: async (payload: unknown) => {
+              replyPayload = payload;
+              return {
+                code: 0,
+                data: {
+                  message_id: "om_reply_1"
+                }
+              };
+            }
+          }
+        }
+      }
+    } as never,
+    console
+  );
+
+  const messageId = await client.sendText({
+    chatId: "oc_chat_1",
+    content: "thread reply",
+    replyToMessageId: "om_origin_1",
+    replyInThread: true
+  });
+
+  assert.equal(messageId, "om_reply_1");
+  assert.deepEqual(replyPayload, {
+    path: {
+      message_id: "om_origin_1"
+    },
+    data: {
+      content: "{\"text\":\"thread reply\"}",
+      msg_type: "text",
+      reply_in_thread: true
+    }
+  });
+});
+
 test("FeishuSdkMessageClient updates text with message.update", async () => {
   let updatePayload: unknown;
 

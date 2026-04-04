@@ -4,11 +4,19 @@ import type { CodexEvent } from "../../domain/types.js";
 import type { CodexTurnContext, CodexWorker } from "./codex-worker.js";
 
 export class MockCodexWorker implements CodexWorker {
+  supportsSteer(): boolean {
+    return true;
+  }
+
   async ensureThread(context: CodexTurnContext): Promise<string> {
     return context.session?.threadId ?? `thread_mock_${Date.now()}`;
   }
 
   async steerTurn(): Promise<void> {
+    return undefined;
+  }
+
+  async interruptTurn(): Promise<void> {
     return undefined;
   }
 

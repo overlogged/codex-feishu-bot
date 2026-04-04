@@ -21,6 +21,11 @@ interface InteractiveCard {
   };
 }
 
+interface AssistantCardSplitOptions {
+  maxTablesPerChunk?: number;
+  maxCharsPerChunk?: number;
+}
+
 function markdownBlock(content: string): Record<string, unknown> {
   return {
     tag: "markdown",
@@ -107,6 +112,161 @@ function stripLeadingProcessParagraph(body: string): string {
   return body
     .replace(/^(?:[-*]\s*)?(?:中间过程|过程同步|过程说明)\s*[：:].*?(?:\n\s*\n|$)/su, "")
     .trim();
+}
+
+function isFenceLine(line: string): boolean {
+  return /^```/.test(line.trim());
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.includes("-")) {
+    return false;
+  }
+
+  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed);
+}
+
+function isMarkdownTableBlock(block: string): boolean {
+  const lines = block
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) {
+    return false;
+  }
+
+  return lines.some((line) => isMarkdownTableSeparator(line)) && lines.some((line) => line.includes("|"));
+}
+
+function splitMarkdownBlocks(content: string): string[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const blocks: string[] = [];
+  let current: string[] = [];
+  let inFence = false;
+
+  const flush = () => {
+    const block = current.join("\n").trim();
+    if (block) {
+      blocks.push(block);
+    }
+    current = [];
+  };
+
+  for (const line of lines) {
+    if (isFenceLine(line)) {
+      current.push(line);
+      inFence = !inFence;
+      continue;
+    }
+
+    if (!inFence && line.trim() === "") {
+      flush();
+      continue;
+    }
+
+    current.push(line);
+  }
+
+  flush();
+  return blocks;
+}
+
+function splitLongBlock(block: string, maxCharsPerChunk: number): string[] {
+  if (block.length <= maxCharsPerChunk || isMarkdownTableBlock(block)) {
+    return [block];
+  }
+
+  const lines = block.split("\n");
+  const chunks: string[] = [];
+  let current = "";
+
+  const flush = () => {
+    const trimmed = current.trim();
+    if (trimmed) {
+      chunks.push(trimmed);
+    }
+    current = "";
+  };
+
+  for (const line of lines) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (current && candidate.length > maxCharsPerChunk) {
+      flush();
+      current = line;
+      continue;
+    }
+    current = candidate;
+  }
+
+  flush();
+  return chunks.length > 0 ? chunks : [block];
+}
+
+export function normalizeAssistantBody(item: Pick<ConversationItem, "content" | "source">): string {
+  let body = item.content?.trim() || "处理中...";
+  if (item.source === "final_answer") {
+    body = stripLeadingProcessParagraph(body);
+    body = stripLeadingLabel(body, ["最终结论", "结论", "Final Answer"]);
+  } else {
+    body = stripLeadingLabel(body, ["中间过程", "过程同步", "过程说明"]);
+  }
+
+  return body || "处理中...";
+}
+
+export function splitAssistantCardBodies(
+  item: Pick<ConversationItem, "content" | "source">,
+  options: AssistantCardSplitOptions = {}
+): string[] {
+  const maxTablesPerChunk = options.maxTablesPerChunk ?? 3;
+  const maxCharsPerChunk = options.maxCharsPerChunk ?? 5500;
+  const normalized = normalizeAssistantBody(item);
+  const blocks = splitMarkdownBlocks(normalized).flatMap((block) => splitLongBlock(block, maxCharsPerChunk));
+
+  if (blocks.length === 0) {
+    return [normalized];
+  }
+
+  const chunks: string[] = [];
+  let currentBlocks: string[] = [];
+  let currentTables = 0;
+  let currentChars = 0;
+
+  const flush = () => {
+    if (currentBlocks.length === 0) {
+      return;
+    }
+    chunks.push(currentBlocks.join("\n\n"));
+    currentBlocks = [];
+    currentTables = 0;
+    currentChars = 0;
+  };
+
+  for (const block of blocks) {
+    const blockTables = isMarkdownTableBlock(block) ? 1 : 0;
+    const blockChars = block.length;
+    const nextChars = currentChars === 0 ? blockChars : currentChars + 2 + blockChars;
+    const exceedsTableLimit = currentTables > 0 && currentTables + blockTables > maxTablesPerChunk;
+    const exceedsCharLimit = currentChars > 0 && nextChars > maxCharsPerChunk;
+
+    if (exceedsTableLimit || exceedsCharLimit) {
+      flush();
+    }
+
+    currentBlocks.push(block);
+    currentTables += blockTables;
+    currentChars = currentChars === 0 ? blockChars : currentChars + 2 + blockChars;
+  }
+
+  flush();
+
+  if (chunks.length <= 1) {
+    return chunks.length === 1 ? chunks : [normalized];
+  }
+
+  return chunks.map((chunk, index) => `**第 ${index + 1}/${chunks.length} 部分**\n\n${chunk}`);
 }
 
 function summarizeTitle(body: string, fallback: string, maxLength = 48): string {
@@ -213,16 +373,8 @@ export function renderFileMessageContent(fileKey: string): string {
   });
 }
 
-export function renderAssistantCardContent(item: ConversationItem): string {
-  let body = item.content?.trim() || "处理中...";
-  if (item.source === "final_answer") {
-    body = stripLeadingProcessParagraph(body);
-    body = stripLeadingLabel(body, ["最终结论", "结论", "Final Answer"]);
-  } else {
-    body = stripLeadingLabel(body, ["中间过程", "过程同步", "过程说明"]);
-  }
-
-  body = body || "处理中...";
+export function renderAssistantCardContent(item: ConversationItem, bodyOverride?: string): string {
+  const body = bodyOverride?.trim() || normalizeAssistantBody(item);
   const elements =
     item.source === "commentary"
       ? [collapsiblePanel(processPreviewTitle(body), body)]

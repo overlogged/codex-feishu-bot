@@ -47,7 +47,8 @@ test("FileBackedChatWorkspaceResolver resolves a configured existing group works
 
   assert.deepEqual(result, {
     ok: true,
-    workspaceId: actualWorkspace
+    workspaceId: actualWorkspace,
+    cli: "codex"
   });
 });
 
@@ -124,8 +125,45 @@ test("FileBackedChatWorkspaceResolver allows direct messages to use the default 
 
   assert.deepEqual(result, {
     ok: true,
-    workspaceId: workspaceRoot
+    workspaceId: workspaceRoot,
+    cli: "codex"
   });
+});
+
+test("FileBackedChatWorkspaceResolver defaults legacy group bindings to codex", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const actualWorkspace = join(workspaceRoot, "Quant");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(actualWorkspace, { recursive: true });
+  await mkdir(join(workspaceRoot, ".codex-feishu-bot"), { recursive: true });
+  await writeFile(
+    configFilePath,
+    JSON.stringify({
+      oc_group_1: {
+        workspace: "Quant"
+      }
+    }),
+    "utf8"
+  );
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.resolve({
+    message: createMessage()
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    workspaceId: actualWorkspace,
+    cli: "codex"
+  });
+
+  const normalized = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
+    string,
+    { workspace: string; cli: string }
+  >;
+  assert.equal(normalized.oc_group_1?.cli, "codex");
 });
 
 test("FileBackedChatWorkspaceResolver lists numbered workspace catalog entries", async () => {
@@ -134,6 +172,7 @@ test("FileBackedChatWorkspaceResolver lists numbered workspace catalog entries",
 
   await mkdir(join(workspaceRoot, "Quant", "project-a"), { recursive: true });
   await mkdir(join(workspaceRoot, "Quant", "project-b"), { recursive: true });
+  await mkdir(join(workspaceRoot, "Downloads"), { recursive: true });
 
   const resolver = new FileBackedChatWorkspaceResolver(
     workspaceRoot,
@@ -143,11 +182,11 @@ test("FileBackedChatWorkspaceResolver lists numbered workspace catalog entries",
 
   assert.deepEqual(
     entries.map((entry) => entry.workspace),
-    ["Quant", "Quant/project-a", "Quant/project-b"]
+    ["Downloads", "Quant"]
   );
   assert.deepEqual(
     entries.map((entry) => entry.code),
-    ["1", "2", "3"]
+    ["1", "2"]
   );
 });
 
@@ -161,22 +200,24 @@ test("FileBackedChatWorkspaceResolver binds a group to a numbered workspace", as
   const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
   const bindResult = await resolver.bindGroupWorkspace({
     chatId: "oc_group_1",
-    code: "2"
+    cli: "claude",
+    code: "1"
   });
 
   assert.equal(bindResult.ok, true);
   if (!bindResult.ok) {
     throw new Error("expected bindGroupWorkspace to succeed");
   }
-  assert.equal(bindResult.entry.workspace, "Quant/project-a");
+  assert.equal(bindResult.entry.workspace, "Quant");
 
   const persistedBindings = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
     string,
-    { workspace: string }
+    { workspace: string; cli: string }
   >;
   assert.deepEqual(persistedBindings, {
     oc_group_1: {
-      workspace: "Quant/project-a"
+      workspace: "Quant",
+      cli: "claude"
     }
   });
 });

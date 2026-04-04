@@ -60,6 +60,8 @@ const envSchema = z.object({
   CODEX_ARTIFACTS_DIR: z.string().default(".codex-feishu-bot/artifacts"),
   RUNTIME_STATE_FILE: z.string().default(".codex-feishu-bot/runtime-state.json"),
   FEISHU_BRIDGE_SCRIPT: z.string().default("scripts/feishu-bridge.mjs"),
+  CLAUDE_CLI_COMMAND: z.string().default("cl"),
+  KIMI_CLI_COMMAND: z.string().default("kimi"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
   FEISHU_PROVIDER: z.enum(["sdk", "fake"]).default("sdk"),
   FEISHU_TRANSPORT: z.enum(["websocket", "webhook", "disabled"]).default("websocket"),

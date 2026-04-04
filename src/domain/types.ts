@@ -1,3 +1,6 @@
+export const CHAT_CLI_VALUES = ["codex", "claude", "kimi"] as const;
+export type ChatCli = (typeof CHAT_CLI_VALUES)[number];
+
 export interface IncomingChatMessage {
   chatId: string;
   chatType: string;
@@ -14,10 +17,28 @@ export interface IncomingChatMessage {
 export interface ChatSession {
   chatId: string;
   threadId: string;
+  cli: ChatCli;
   workspaceId: string;
   activeRunId?: string;
   activeTurnId?: string;
   updatedAt: string;
+}
+
+export type ScheduledTaskStatus = "enabled" | "paused";
+
+export interface ScheduledTaskRecord {
+  chatId: string;
+  taskId: string;
+  cron: string;
+  prompt: string;
+  status: ScheduledTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  createdById?: string;
+  createdByName?: string;
+  nextRunAt?: string;
+  lastTriggeredAt?: string;
+  lastError?: string;
 }
 
 export type RunStatus = "queued" | "running" | "completed" | "failed";
@@ -54,6 +75,7 @@ export interface ConversationItem {
   filePaths: string[];
   artifactPath?: string;
   feishuMessageId?: string;
+  feishuMessageIds?: string[];
   deliveredContentHash?: string;
   createdAt: string;
   updatedAt: string;

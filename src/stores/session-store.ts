@@ -29,9 +29,9 @@ export class SessionStore {
     this.onChange?.();
   }
 
-  bindTurn(chatId: string, turnId: string): void {
+  bindTurn(chatId: string, turnId: string, runId?: string): void {
     const session = this.sessions.get(chatId);
-    if (!session) {
+    if (!session || (runId && session.activeRunId !== runId)) {
       return;
     }
 
@@ -43,9 +43,24 @@ export class SessionStore {
     this.onChange?.();
   }
 
-  releaseRun(chatId: string): void {
+  updateBoundRun(chatId: string, runId: string, patch: Partial<ChatSession>): void {
     const session = this.sessions.get(chatId);
-    if (!session) {
+    if (!session || session.activeRunId !== runId) {
+      return;
+    }
+
+    this.sessions.set(chatId, {
+      ...session,
+      ...patch,
+      activeRunId: runId,
+      updatedAt: new Date().toISOString()
+    });
+    this.onChange?.();
+  }
+
+  releaseRun(chatId: string, runId?: string): void {
+    const session = this.sessions.get(chatId);
+    if (!session || (runId && session.activeRunId !== runId)) {
       return;
     }
 

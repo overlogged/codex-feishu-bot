@@ -1,13 +1,24 @@
 import type { ConversationItem } from "../../domain/types.js";
 import {
+  normalizeAssistantBody,
   renderAssistantCardContent,
   renderFileMessageContent,
   renderTextMessageContent,
-  renderToolCardContent
+  renderToolCardContent,
+  splitAssistantCardBodies
 } from "./feishu-card-renderer.js";
 
+export { normalizeAssistantBody, renderAssistantCardContent, splitAssistantCardBodies };
+
+export interface FeishuTextSendInput {
+  chatId: string;
+  content: string;
+  replyToMessageId?: string;
+  replyInThread?: boolean;
+}
+
 export interface FeishuMessageClient {
-  sendText(input: { chatId: string; content: string }): Promise<string>;
+  sendText(input: FeishuTextSendInput): Promise<string>;
   updateText(input: { messageId: string; content: string }): Promise<void>;
   sendCard(input: { chatId: string; content: string }): Promise<string>;
   updateCard(input: { messageId: string; content: string }): Promise<void>;
@@ -15,12 +26,14 @@ export interface FeishuMessageClient {
 }
 
 export class ConsoleFeishuMessageClient implements FeishuMessageClient {
-  async sendText(input: { chatId: string; content: string }): Promise<string> {
+  async sendText(input: FeishuTextSendInput): Promise<string> {
     const messageId = `text_${Date.now()}`;
     console.log(
       `[Feishu Text Send] ${messageId}\n${JSON.stringify(
         {
           chatId: input.chatId,
+          replyToMessageId: input.replyToMessageId,
+          replyInThread: input.replyInThread,
           content: JSON.parse(renderTextMessageContent(input.content))
         },
         null,

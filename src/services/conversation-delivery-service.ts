@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 
 import type { ConversationItem } from "../domain/types.js";
-import { renderConversationItem } from "../integrations/feishu/feishu-message-client.js";
+import {
+  renderAssistantCardContent,
+  splitAssistantCardBodies
+} from "../integrations/feishu/feishu-message-client.js";
 import type { FeishuMessageClient } from "../integrations/feishu/feishu-message-client.js";
 import { ConversationStore } from "../stores/conversation-store.js";
 
@@ -9,6 +12,11 @@ interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
   warn(message: unknown, ...args: unknown[]): void;
   error(message: unknown, ...args: unknown[]): void;
+}
+
+interface AssistantDeliveryPlan {
+  contents: string[];
+  hash: string;
 }
 
 export class ConversationDeliveryService {
@@ -90,7 +98,6 @@ export class ConversationDeliveryService {
     }
 
     if (item.kind === "tool_card") {
-      await this.deliverToolItem(item);
       return;
     }
 
@@ -100,63 +107,81 @@ export class ConversationDeliveryService {
   }
 
   private async deliverTextItem(item: ConversationItem): Promise<void> {
+    if (item.phase !== "completed" && item.phase !== "failed") {
+      return;
+    }
+
     const content = item.content?.trim();
     if (!content) {
       return;
     }
 
-    const cardContent = renderConversationItem(item);
-    const nextHash = this.hashContent("assistant_card", cardContent);
-    if (item.deliveredContentHash === nextHash) {
+    let plan = this.buildAssistantDeliveryPlan(item);
+    if (item.deliveredContentHash === plan.hash) {
       return;
     }
 
-    if (!item.feishuMessageId) {
-      const messageId = await this.feishuClient.sendCard({
-        chatId: item.chatId,
-        content: cardContent
-      });
-      this.conversationStore.update(item.runId, item.itemId, {
-        feishuMessageId: messageId,
-        deliveredContentHash: nextHash
-      });
-      return;
-    }
+    try {
+      await this.deliverAssistantPlan(item, plan);
+    } catch (error) {
+      if (!this.isCardTableLimitError(error)) {
+        throw error;
+      }
 
-    await this.feishuClient.updateCard({
-      messageId: item.feishuMessageId,
-      content: cardContent
-    });
-    this.conversationStore.update(item.runId, item.itemId, {
-      deliveredContentHash: nextHash
-    });
+      plan = this.buildAssistantDeliveryPlan(item, {
+        maxTablesPerChunk: 1,
+        maxCharsPerChunk: 2200
+      });
+      if (item.deliveredContentHash === plan.hash) {
+        return;
+      }
+
+      await this.deliverAssistantPlan(item, plan);
+    }
   }
 
-  private async deliverToolItem(item: ConversationItem): Promise<void> {
-    const content = renderConversationItem(item);
-    const nextHash = this.hashContent("card", content);
-    if (item.deliveredContentHash === nextHash) {
-      return;
+  private buildAssistantDeliveryPlan(
+    item: ConversationItem,
+    options?: {
+      maxTablesPerChunk?: number;
+      maxCharsPerChunk?: number;
     }
+  ): AssistantDeliveryPlan {
+    const contents = splitAssistantCardBodies(item, options).map((body) =>
+      renderAssistantCardContent(item, body)
+    );
 
-    if (!item.feishuMessageId) {
-      const messageId = await this.feishuClient.sendCard({
-        chatId: item.chatId,
+    return {
+      contents,
+      hash: this.hashContent("assistant_card_parts", JSON.stringify(contents))
+    };
+  }
+
+  private async deliverAssistantPlan(item: ConversationItem, plan: AssistantDeliveryPlan): Promise<void> {
+    const messageIds = item.feishuMessageIds ?? (item.feishuMessageId ? [item.feishuMessageId] : []);
+    const updatedMessageIds = [...messageIds];
+
+    for (let index = 0; index < plan.contents.length; index += 1) {
+      const content = plan.contents[index]!;
+      const messageId = updatedMessageIds[index];
+      if (!messageId) {
+        updatedMessageIds[index] = await this.feishuClient.sendCard({
+          chatId: item.chatId,
+          content
+        });
+        continue;
+      }
+
+      await this.feishuClient.updateCard({
+        messageId,
         content
       });
-      this.conversationStore.update(item.runId, item.itemId, {
-        feishuMessageId: messageId,
-        deliveredContentHash: nextHash
-      });
-      return;
     }
 
-    await this.feishuClient.updateCard({
-      messageId: item.feishuMessageId,
-      content
-    });
     this.conversationStore.update(item.runId, item.itemId, {
-      deliveredContentHash: nextHash
+      feishuMessageId: updatedMessageIds[0],
+      feishuMessageIds: updatedMessageIds.slice(0, plan.contents.length),
+      deliveredContentHash: plan.hash
     });
   }
 
@@ -182,5 +207,32 @@ export class ConversationDeliveryService {
 
   private hashContent(kind: string, content: string): string {
     return createHash("sha1").update(kind).update("\u0000").update(content).digest("hex");
+  }
+
+  private isCardTableLimitError(error: unknown): boolean {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+
+    const maybeError = error as {
+      message?: string;
+      response?: {
+        data?: {
+          msg?: string;
+          code?: number;
+        };
+      };
+    };
+
+    const text = [
+      maybeError.message,
+      maybeError.response?.data?.msg,
+      String(maybeError.response?.data?.code ?? "")
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return text.includes("card table number over limit") || text.includes("11310");
   }
 }

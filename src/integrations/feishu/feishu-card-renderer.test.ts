@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ConversationItem } from "../../domain/types.js";
 import {
   renderAssistantCardContent,
+  splitAssistantCardBodies,
   renderToolCardContent
 } from "./feishu-card-renderer.js";
 
@@ -70,6 +71,47 @@ test("renderAssistantCardContent strips duplicated process paragraph from final 
     payload.body.elements[0].content,
     "- `build`: `tsc -p tsconfig.json`\n- `test`: `tsx --test`"
   );
+});
+
+test("splitAssistantCardBodies splits final answers with many markdown tables", () => {
+  const bodies = splitAssistantCardBodies(
+    createItem({
+      source: "final_answer",
+      content: [
+        "总览",
+        "",
+        "| A | B |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+        "",
+        "说明一",
+        "",
+        "| C | D |",
+        "| --- | --- |",
+        "| 3 | 4 |",
+        "",
+        "说明二",
+        "",
+        "| E | F |",
+        "| --- | --- |",
+        "| 5 | 6 |",
+        "",
+        "说明三",
+        "",
+        "| G | H |",
+        "| --- | --- |",
+        "| 7 | 8 |"
+      ].join("\n")
+    }),
+    {
+      maxTablesPerChunk: 2,
+      maxCharsPerChunk: 2000
+    }
+  );
+
+  assert.equal(bodies.length, 2);
+  assert.match(bodies[0] ?? "", /第 1\/2 部分/);
+  assert.match(bodies[1] ?? "", /第 2\/2 部分/);
 });
 
 test("renderToolCardContent emits markdown blocks for tool progress", () => {

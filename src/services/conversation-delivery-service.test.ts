@@ -25,7 +25,7 @@ function createItem(overrides: Partial<ConversationItem> = {}): ConversationItem
   };
 }
 
-test("ConversationDeliveryService sends then updates the same assistant text item as one card", async () => {
+test("ConversationDeliveryService only delivers completed assistant summaries", async () => {
   const calls: string[] = [];
   const conversationStore = new ConversationStore();
   const service = new ConversationDeliveryService(
@@ -58,11 +58,12 @@ test("ConversationDeliveryService sends then updates the same assistant text ite
   await service.flush("run_1", "msg_1");
 
   conversationStore.update("run_1", "msg_1", {
-    content: "处理中..."
+    phase: "completed",
+    content: "阶段总结：已完成准备工作"
   });
   await service.flush("run_1", "msg_1");
 
-  assert.deepEqual(calls, ["sendCard", "updateCard"]);
+  assert.deepEqual(calls, ["sendCard"]);
 });
 
 test("ConversationDeliveryService serializes concurrent flushes for the same item", async () => {
@@ -94,7 +95,12 @@ test("ConversationDeliveryService serializes concurrent flushes for the same ite
     console
   );
 
-  conversationStore.save(createItem());
+  conversationStore.save(
+    createItem({
+      phase: "completed",
+      content: "阶段总结：已完成"
+    })
+  );
 
   const firstFlush = service.flush("run_1", "msg_1");
   const secondFlush = service.flush("run_1", "msg_1");
@@ -105,4 +111,113 @@ test("ConversationDeliveryService serializes concurrent flushes for the same ite
   await Promise.all([firstFlush, secondFlush]);
 
   assert.deepEqual(calls, ["sendCard"]);
+});
+
+test("ConversationDeliveryService does not send tool cards to Feishu", async () => {
+  const calls: string[] = [];
+  const conversationStore = new ConversationStore();
+  const service = new ConversationDeliveryService(
+    {
+      sendText: async () => {
+        calls.push("sendText");
+        return "om_text_1";
+      },
+      updateText: async () => {
+        calls.push("updateText");
+      },
+      sendCard: async () => {
+        calls.push("sendCard");
+        return "om_card_1";
+      },
+      updateCard: async () => {
+        calls.push("updateCard");
+      },
+      sendFile: async () => {
+        calls.push("sendFile");
+        return "om_file_1";
+      }
+    },
+    conversationStore,
+    1,
+    console
+  );
+
+  conversationStore.save(
+    createItem({
+      itemId: "tool_1",
+      kind: "tool_card",
+      source: "tool",
+      phase: "completed",
+      title: "执行命令",
+      output: "done"
+    })
+  );
+
+  await service.flush("run_1", "tool_1");
+
+  assert.deepEqual(calls, []);
+});
+
+test("ConversationDeliveryService splits large assistant cards into multiple messages", async () => {
+  const sentCards: string[] = [];
+  const conversationStore = new ConversationStore();
+  const service = new ConversationDeliveryService(
+    {
+      sendText: async () => "om_text_1",
+      updateText: async () => {
+        return undefined;
+      },
+      sendCard: async (input) => {
+        sentCards.push(input.content);
+        return `om_card_${sentCards.length}`;
+      },
+      updateCard: async () => {
+        return undefined;
+      },
+      sendFile: async () => "om_file_1"
+    },
+    conversationStore,
+    1,
+    console
+  );
+
+  conversationStore.save(
+    createItem({
+      phase: "completed",
+      source: "final_answer",
+      content: [
+        "总览",
+        "",
+        "| A | B |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+        "",
+        "说明一",
+        "",
+        "| C | D |",
+        "| --- | --- |",
+        "| 3 | 4 |",
+        "",
+        "说明二",
+        "",
+        "| E | F |",
+        "| --- | --- |",
+        "| 5 | 6 |",
+        "",
+        "说明三",
+        "",
+        "| G | H |",
+        "| --- | --- |",
+        "| 7 | 8 |"
+      ].join("\n")
+    })
+  );
+
+  await service.flush("run_1", "msg_1");
+
+  const stored = conversationStore.get("run_1", "msg_1");
+  assert.equal(sentCards.length, 2);
+  assert.deepEqual(stored?.feishuMessageIds, ["om_card_1", "om_card_2"]);
+  assert.equal(stored?.feishuMessageId, "om_card_1");
+  assert.ok(stored?.deliveredContentHash);
 });

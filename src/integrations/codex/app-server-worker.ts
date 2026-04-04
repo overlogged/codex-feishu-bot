@@ -118,7 +118,8 @@ function buildTurnInput(
     `- Unless the user explicitly asks you to change repository files, create generated exports under ${artifactsDir}.`,
     `- Before generating a presentation, spreadsheet, image export, PDF, or other deliverable file, ensure ${artifactsDir} exists and write the file there instead of the repository root.`,
     "- Use commentary messages only for progress updates. Do not put the final conclusion in commentary.",
-    "- Keep commentary sparse and information-dense. Only send commentary when there is meaningful progress, a concrete finding, or a material change in plan.",
+    "- Keep commentary sparse and information-dense. Only send commentary at phase boundaries or after substantial milestones.",
+    "- Never narrate every tool call, command delta, or file edit in commentary. Commentary should summarize progress since the last summary.",
     "- Emit exactly one final_answer for the final user-facing answer.",
     "- Do not repeat commentary or process summaries in final_answer.",
     "- Do not prefix final_answer with labels like '中间过程', '过程同步', '最终结论', or 'Final Answer'; the Feishu UI already labels the message type.",
@@ -238,6 +239,10 @@ export class CodexAppServerWorker implements CodexWorker {
         }
       }, 2_000);
     });
+  }
+
+  supportsSteer(): boolean {
+    return true;
   }
 
   async ensureThread(context: CodexTurnContext): Promise<string> {
@@ -401,6 +406,63 @@ export class CodexAppServerWorker implements CodexWorker {
           await new Promise((resolve) => setTimeout(resolve, 150));
         }
       }
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async interruptTurn(
+    context: CodexTurnContext & { threadId: string; turnId: string }
+  ): Promise<void> {
+    await this.start();
+
+    const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
+      logger: this.logger,
+      label: "interrupt-turn"
+    });
+    await connection.connect();
+
+    try {
+      this.logger?.info(
+        {
+          chatId: context.message.chatId,
+          messageId: context.message.messageId,
+          threadId: context.threadId,
+          turnId: context.turnId
+        },
+        "尝试中断当前 Codex turn 以切换新会话"
+      );
+
+      await connection.request("turn/interrupt", {
+        threadId: context.threadId,
+        turnId: context.turnId
+      });
+
+      this.logger?.info(
+        {
+          chatId: context.message.chatId,
+          messageId: context.message.messageId,
+          threadId: context.threadId,
+          turnId: context.turnId
+        },
+        "Codex turn/interrupt 成功"
+      );
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      if (/not\s+active|not\s+found|already/i.test(messageText)) {
+        this.logger?.warn(
+          {
+            chatId: context.message.chatId,
+            messageId: context.message.messageId,
+            threadId: context.threadId,
+            turnId: context.turnId,
+            error: messageText
+          },
+          "Codex turn 已不再活跃，视为中断完成"
+        );
+        return;
+      }
+      throw error;
     } finally {
       await connection.close();
     }

@@ -7,6 +7,12 @@ SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 CODEX_UNIT="${SYSTEMD_USER_DIR}/codex-feishu-bot-codex.service"
 APP_UNIT="${SYSTEMD_USER_DIR}/codex-feishu-bot-app.service"
 
+NODE_BIN_DIR=""
+if command -v node >/dev/null 2>&1; then
+  NODE_BIN_DIR="$(dirname "$(command -v node)")"
+fi
+PATH_VALUE="${NODE_BIN_DIR}:${HOME}/.local/bin:${HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 mkdir -p "${SYSTEMD_USER_DIR}"
 
 cat > "${CODEX_UNIT}" <<EOF
@@ -21,7 +27,9 @@ WorkingDirectory=${ROOT_DIR}
 ExecStart=${ROOT_DIR}/scripts/start-host-codex-app-server.sh
 Restart=always
 RestartSec=3
+EnvironmentFile=-${ROOT_DIR}/.env.real
 Environment=HOME=%h
+Environment=PATH=${PATH_VALUE}
 
 [Install]
 WantedBy=default.target
@@ -41,7 +49,9 @@ ExecStartPre=${ROOT_DIR}/scripts/build-host-app.sh
 ExecStart=${ROOT_DIR}/scripts/start-host-app.sh
 Restart=always
 RestartSec=3
+EnvironmentFile=-${ROOT_DIR}/.env.real
 Environment=HOME=%h
+Environment=PATH=${PATH_VALUE}
 
 [Install]
 WantedBy=default.target

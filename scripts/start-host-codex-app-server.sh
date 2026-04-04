@@ -7,8 +7,10 @@ ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env.real}"
 
 if ! command -v codex >/dev/null 2>&1; then
   if [ -s "${HOME}/.nvm/nvm.sh" ]; then
+    set +u
     # shellcheck disable=SC1090
     . "${HOME}/.nvm/nvm.sh"
+    set -u
     nvm use default >/dev/null 2>&1 || true
   fi
 fi

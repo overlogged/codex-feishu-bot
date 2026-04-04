@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { ConversationStore } from "./conversation-store.js";
 import { RunStore } from "./run-store.js";
 import { RuntimeStatePersister } from "./runtime-state-persister.js";
+import { ScheduledTaskStore } from "./scheduled-task-store.js";
 import { SessionStore } from "./session-store.js";
 
 test("RuntimeStatePersister restores sessions and clears stale active run state", async () => {
@@ -18,16 +19,19 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
   const sessionStore = new SessionStore(persist);
   const runStore = new RunStore(persist);
   const conversationStore = new ConversationStore(persist);
+  const scheduledTaskStore = new ScheduledTaskStore(persist);
 
   persister.attach({
     sessionStore,
     runStore,
-    conversationStore
+    conversationStore,
+    scheduledTaskStore
   });
 
   sessionStore.save({
     chatId: "oc_chat_1",
     threadId: "thread_1",
+    cli: "codex",
     workspaceId: "/workspace",
     activeRunId: "run_1",
     activeTurnId: "turn_1",
@@ -57,18 +61,30 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
     createdAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z"
   });
+  scheduledTaskStore.save({
+    chatId: "oc_chat_1",
+    taskId: "1",
+    cron: "0 9 * * *",
+    prompt: "hello",
+    status: "enabled",
+    createdAt: "2026-03-09T00:00:00.000Z",
+    updatedAt: "2026-03-09T00:00:00.000Z",
+    nextRunAt: "2026-03-10T01:00:00.000Z"
+  });
 
   await persister.flush();
 
   const restoredSessionStore = new SessionStore();
   const restoredRunStore = new RunStore();
   const restoredConversationStore = new ConversationStore();
+  const restoredScheduledTaskStore = new ScheduledTaskStore();
   const restoredPersister = new RuntimeStatePersister(filePath);
 
   const restored = await restoredPersister.restore({
     sessionStore: restoredSessionStore,
     runStore: restoredRunStore,
-    conversationStore: restoredConversationStore
+    conversationStore: restoredConversationStore,
+    scheduledTaskStore: restoredScheduledTaskStore
   });
 
   assert.deepEqual(restored.interruptedRuns, [
@@ -83,6 +99,7 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
   const restoredSession = restoredSessionStore.get("oc_chat_1");
   assert.ok(restoredSession);
   assert.equal(restoredSession.threadId, "thread_1");
+  assert.equal(restoredSession.cli, "codex");
   assert.equal(restoredSession.activeRunId, undefined);
   assert.equal(restoredSession.activeTurnId, undefined);
 
@@ -95,8 +112,13 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
   assert.ok(restoredItem);
   assert.equal(restoredItem.content, "hello");
 
+  const restoredTask = restoredScheduledTaskStore.get("oc_chat_1", "1");
+  assert.ok(restoredTask);
+  assert.equal(restoredTask.prompt, "hello");
+
   await restoredPersister.flush();
   const raw = await readFile(filePath, "utf8");
   assert.match(raw, /"threadId":"thread_1"/);
   assert.match(raw, /"status":"failed"/);
+  assert.match(raw, /"scheduledTasks"/);
 });

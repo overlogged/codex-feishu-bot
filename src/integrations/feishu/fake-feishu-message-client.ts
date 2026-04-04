@@ -4,7 +4,7 @@ import {
   renderFileMessageContent,
   renderTextMessageContent
 } from "./feishu-card-renderer.js";
-import type { FeishuMessageClient } from "./feishu-message-client.js";
+import type { FeishuMessageClient, FeishuTextSendInput } from "./feishu-message-client.js";
 
 interface FakeFeishuResponse<T> {
   code: number;
@@ -15,18 +15,30 @@ interface FakeFeishuResponse<T> {
 export class FakeFeishuMessageClient implements FeishuMessageClient {
   constructor(private readonly baseUrl: string) {}
 
-  async sendText(input: { chatId: string; content: string }): Promise<string> {
-    const response = await this.request<{ message_id: string }>(
-      `/open-apis/im/v1/messages?receive_id_type=chat_id`,
-      {
-        method: "POST",
-        body: {
-          receive_id: input.chatId,
-          content: renderTextMessageContent(input.content),
-          msg_type: "text"
-        }
-      }
-    );
+  async sendText(input: FeishuTextSendInput): Promise<string> {
+    const response = input.replyToMessageId
+      ? await this.request<{ message_id: string }>(
+          `/open-apis/im/v1/messages/${input.replyToMessageId}/reply`,
+          {
+            method: "POST",
+            body: {
+              content: renderTextMessageContent(input.content),
+              msg_type: "text",
+              reply_in_thread: input.replyInThread
+            }
+          }
+        )
+      : await this.request<{ message_id: string }>(
+          `/open-apis/im/v1/messages?receive_id_type=chat_id`,
+          {
+            method: "POST",
+            body: {
+              receive_id: input.chatId,
+              content: renderTextMessageContent(input.content),
+              msg_type: "text"
+            }
+          }
+        );
 
     return response.message_id;
   }

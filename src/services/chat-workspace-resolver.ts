@@ -1,7 +1,12 @@
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
-import type { IncomingChatMessage, ChatSession } from "../domain/types.js";
+import {
+  CHAT_CLI_VALUES,
+  type ChatCli,
+  type IncomingChatMessage,
+  type ChatSession
+} from "../domain/types.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -14,6 +19,7 @@ type ChatWorkspaceBindingRecord = Record<
   | string
   | {
       workspace?: string;
+      cli?: string;
     }
 >;
 
@@ -23,10 +29,17 @@ export interface ChatWorkspaceCatalogEntry {
   workspaceId: string;
 }
 
+interface ParsedChatBinding {
+  workspace?: string;
+  cli?: ChatCli;
+  rawCli?: string;
+}
+
 export type ChatWorkspaceResolution =
   | {
       ok: true;
       workspaceId: string;
+      cli: ChatCli;
     }
   | {
       ok: false;
@@ -50,11 +63,13 @@ export interface ChatWorkspaceResolver {
   lookupCatalogEntry(code: string): Promise<ChatWorkspaceCatalogEntry | undefined>;
   bindGroupWorkspace(input: {
     chatId: string;
+    cli: ChatCli;
     code: string;
   }): Promise<
     | {
         ok: true;
         entry: ChatWorkspaceCatalogEntry;
+        cli: ChatCli;
         configFilePath: string;
       }
     | {
@@ -66,7 +81,6 @@ export interface ChatWorkspaceResolver {
   >;
 }
 
-const MAX_CATALOG_DEPTH = 3;
 const SKIPPED_DIRECTORY_NAMES = new Set([
   "node_modules",
   "dist",
@@ -80,20 +94,37 @@ const SKIPPED_DIRECTORY_NAMES = new Set([
   "__pycache__"
 ]);
 
-function parseBindingWorkspace(
-  value: string | { workspace?: string } | undefined
-): string | undefined {
+const SUPPORTED_CHAT_CLIS = new Set<ChatCli>(CHAT_CLI_VALUES);
+
+function parseBindingWorkspace(value: string | { workspace?: string; cli?: string } | undefined): ParsedChatBinding {
   if (typeof value === "string") {
     const trimmed = value.trim();
-    return trimmed || undefined;
+    return {
+      workspace: trimmed || undefined,
+      cli: "codex"
+    };
   }
 
-  if (value && typeof value.workspace === "string") {
-    const trimmed = value.workspace.trim();
-    return trimmed || undefined;
+  if (!value || typeof value !== "object") {
+    return {};
   }
 
-  return undefined;
+  const workspace =
+    typeof value.workspace === "string" && value.workspace.trim()
+      ? value.workspace.trim()
+      : undefined;
+  const cli =
+    typeof value.cli === "string" && SUPPORTED_CHAT_CLIS.has(value.cli as ChatCli)
+      ? (value.cli as ChatCli)
+      : value.cli === undefined
+        ? "codex"
+        : undefined;
+
+  return {
+    workspace,
+    cli,
+    rawCli: typeof value.cli === "string" ? value.cli.trim() || undefined : undefined
+  };
 }
 
 function isWithinWorkspaceRoot(workspaceRoot: string, resolvedWorkspace: string): boolean {
@@ -101,12 +132,49 @@ function isWithinWorkspaceRoot(workspaceRoot: string, resolvedWorkspace: string)
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
-function normalizeRelativePath(pathValue: string): string {
-  return pathValue.split(sep).join("/");
-}
-
 function sortBindings(bindings: ChatWorkspaceBindingRecord): ChatWorkspaceBindingRecord {
   return Object.fromEntries(Object.entries(bindings).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function normalizeBindings(bindings: ChatWorkspaceBindingRecord): {
+  bindings: ChatWorkspaceBindingRecord;
+  changed: boolean;
+} {
+  let changed = false;
+  const nextEntries = Object.entries(bindings).map(([chatId, value]) => {
+    if (typeof value === "string") {
+      changed = true;
+      return [
+        chatId,
+        {
+          workspace: value,
+          cli: "codex"
+        }
+      ] as const;
+    }
+
+    if (!value || typeof value !== "object") {
+      return [chatId, value] as const;
+    }
+
+    if (typeof value.workspace === "string" && value.workspace.trim() && value.cli === undefined) {
+      changed = true;
+      return [
+        chatId,
+        {
+          workspace: value.workspace.trim(),
+          cli: "codex"
+        }
+      ] as const;
+    }
+
+    return [chatId, value] as const;
+  });
+
+  return {
+    bindings: Object.fromEntries(nextEntries),
+    changed
+  };
 }
 
 function shouldIncludeDirectory(name: string): boolean {
@@ -128,7 +196,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     if (message.chatType !== "group") {
       return {
         ok: true,
-        workspaceId: session?.workspaceId ?? this.defaultWorkspace
+        workspaceId: session?.workspaceId ?? this.defaultWorkspace,
+        cli: "codex"
       };
     }
 
@@ -142,8 +211,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
           chatId: message.chatId,
           detail: [
             "这个群还没有绑定工作区，任务不会启动。",
-            "先私聊机器人发送“工作区”获取子目录编号。",
-            "再回到群里 @机器人 发送编号完成绑定。"
+            "直接在群里 @机器人 说“看看有哪些工作区”或“把这个群绑定到 codex 的 Quant”。",
+            "群里 @机器人的消息会进入配置控制线程。"
           ].join("\n")
         };
       }
@@ -162,8 +231,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
 
     const bindings = bindingsResult.bindings;
 
-    const configuredWorkspace = parseBindingWorkspace(bindings[message.chatId]);
-    if (!configuredWorkspace) {
+    const configuredBinding = parseBindingWorkspace(bindings[message.chatId]);
+    if (!configuredBinding.workspace) {
       return {
         ok: false,
         reason: "group_workspace_unconfigured",
@@ -171,15 +240,29 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         chatId: message.chatId,
         detail: [
           "这个群还没有绑定工作区，任务不会启动。",
-          "先私聊机器人发送“工作区”获取子目录编号。",
-          "再回到群里 @机器人 发送编号完成绑定。"
+          "直接在群里 @机器人 说“看看有哪些工作区”或“把这个群绑定到 codex 的 Quant”。",
+          "群里 @机器人的消息会进入配置控制线程。"
         ].join("\n")
       };
     }
 
-    const resolvedWorkspace = isAbsolute(configuredWorkspace)
-      ? configuredWorkspace
-      : resolve(this.defaultWorkspace, configuredWorkspace);
+    if (!configuredBinding.cli) {
+      return {
+        ok: false,
+        reason: "group_workspace_invalid",
+        configFilePath: this.configFilePath,
+        chatId: message.chatId,
+        configuredWorkspace: configuredBinding.workspace,
+        detail: [
+          `这个群配置的 CLI 是 ${configuredBinding.rawCli ?? "空值"}，但当前只支持 ${CHAT_CLI_VALUES.join(" / ")}。`,
+          `请修正 ${this.configFilePath} 里的 cli 字段后再重试。`
+        ].join("\n")
+      };
+    }
+
+    const resolvedWorkspace = isAbsolute(configuredBinding.workspace)
+      ? configuredBinding.workspace
+      : resolve(this.defaultWorkspace, configuredBinding.workspace);
 
     if (!isWithinWorkspaceRoot(this.defaultWorkspace, resolvedWorkspace)) {
       return {
@@ -187,7 +270,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         reason: "group_workspace_invalid",
         configFilePath: this.configFilePath,
         chatId: message.chatId,
-        configuredWorkspace,
+        configuredWorkspace: configuredBinding.workspace,
         resolvedWorkspace,
         detail: [
           `这个群配置的工作区是 ${resolvedWorkspace}，但它不在映射根 ${this.defaultWorkspace} 下面，任务不会启动。`,
@@ -204,7 +287,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
           reason: "group_workspace_missing",
           configFilePath: this.configFilePath,
           chatId: message.chatId,
-          configuredWorkspace,
+          configuredWorkspace: configuredBinding.workspace,
           resolvedWorkspace,
           detail: [
             `这个群配置的工作区是 ${resolvedWorkspace}，但它不是目录，任务不会启动。`,
@@ -220,7 +303,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
           reason: "group_workspace_missing",
           configFilePath: this.configFilePath,
           chatId: message.chatId,
-          configuredWorkspace,
+          configuredWorkspace: configuredBinding.workspace,
           resolvedWorkspace,
           detail: [
             `这个群配置的工作区是 ${resolvedWorkspace}，但目录不存在，任务不会启动。`,
@@ -233,7 +316,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
 
     return {
       ok: true,
-      workspaceId: resolvedWorkspace
+      workspaceId: resolvedWorkspace,
+      cli: configuredBinding.cli
     };
   }
 
@@ -258,11 +342,13 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
 
   async bindGroupWorkspace(input: {
     chatId: string;
+    cli: ChatCli;
     code: string;
   }): Promise<
     | {
         ok: true;
         entry: ChatWorkspaceCatalogEntry;
+        cli: ChatCli;
         configFilePath: string;
       }
     | {
@@ -314,7 +400,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     const bindings: ChatWorkspaceBindingRecord = {
       ...bindingsResult.bindings,
       [input.chatId]: {
-        workspace: entry.workspace
+        workspace: entry.workspace,
+        cli: input.cli
       }
     };
 
@@ -330,6 +417,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     return {
       ok: true,
       entry,
+      cli: input.cli,
       configFilePath: this.configFilePath
     };
   }
@@ -370,9 +458,20 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("配置文件顶层必须是 JSON 对象");
       }
+      const normalized = normalizeBindings(parsed as ChatWorkspaceBindingRecord);
+      if (normalized.changed) {
+        await mkdir(dirname(this.configFilePath), {
+          recursive: true
+        });
+        await writeFile(
+          this.configFilePath,
+          `${JSON.stringify(sortBindings(normalized.bindings), null, 2)}\n`,
+          "utf8"
+        );
+      }
       return {
         ok: true,
-        bindings: parsed as ChatWorkspaceBindingRecord
+        bindings: normalized.bindings
       };
     } catch (error) {
       this.logger?.warn(
@@ -390,44 +489,12 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
   }
 
   private async scanCatalog(): Promise<string[]> {
-    const entries: string[] = [];
-    await this.collectDirectories("", MAX_CATALOG_DEPTH, entries);
-    return entries;
-  }
-
-  private async collectDirectories(
-    parentRelativePath: string,
-    remainingDepth: number,
-    entries: string[]
-  ): Promise<void> {
-    if (remainingDepth <= 0) {
-      return;
-    }
-
-    const absolutePath = parentRelativePath
-      ? resolve(this.defaultWorkspace, parentRelativePath)
-      : this.defaultWorkspace;
-    const directoryEntries = await readdir(absolutePath, {
+    const directoryEntries = await readdir(this.defaultWorkspace, {
       withFileTypes: true
     });
-    const childDirectories = directoryEntries
+    return directoryEntries
       .filter((entry) => entry.isDirectory() && shouldIncludeDirectory(entry.name))
       .map((entry) => entry.name)
       .sort((left, right) => left.localeCompare(right));
-
-    for (const directoryName of childDirectories) {
-      const relativePath = parentRelativePath
-        ? join(parentRelativePath, directoryName)
-        : directoryName;
-      const normalizedRelativePath = normalizeRelativePath(relativePath);
-      const resolvedWorkspace = resolve(this.defaultWorkspace, normalizedRelativePath);
-      const directoryStat = await stat(resolvedWorkspace);
-      if (!directoryStat.isDirectory()) {
-        continue;
-      }
-
-      entries.push(normalizedRelativePath);
-      await this.collectDirectories(normalizedRelativePath, remainingDepth - 1, entries);
-    }
   }
 }

@@ -1,9 +1,16 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { ConversationItem, RunRecord, ChatSession } from "../domain/types.js";
+import type {
+  ChatCli,
+  ConversationItem,
+  RunRecord,
+  ChatSession,
+  ScheduledTaskRecord
+} from "../domain/types.js";
 import { ConversationStore } from "./conversation-store.js";
 import { RunStore } from "./run-store.js";
+import { ScheduledTaskStore } from "./scheduled-task-store.js";
 import { SessionStore } from "./session-store.js";
 
 interface LoggerLike {
@@ -13,17 +20,19 @@ interface LoggerLike {
 }
 
 interface RuntimeStateSnapshot {
-  version: 1;
+  version: 3;
   savedAt: string;
   sessions: ChatSession[];
   runs: RunRecord[];
   items: ConversationItem[];
+  scheduledTasks: ScheduledTaskRecord[];
 }
 
 interface RuntimeStores {
   sessionStore: SessionStore;
   runStore: RunStore;
   conversationStore: ConversationStore;
+  scheduledTaskStore: ScheduledTaskStore;
 }
 
 export interface InterruptedRunNotice {
@@ -35,6 +44,10 @@ export interface InterruptedRunNotice {
 
 export interface RuntimeRestoreResult {
   interruptedRuns: InterruptedRunNotice[];
+}
+
+function normalizeCli(value: unknown): ChatCli {
+  return value === "claude" || value === "kimi" ? value : "codex";
 }
 
 export class RuntimeStatePersister {
@@ -112,6 +125,7 @@ export class RuntimeStatePersister {
       const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
       const runs = Array.isArray(parsed.runs) ? parsed.runs : [];
       const items = Array.isArray(parsed.items) ? parsed.items : [];
+      const scheduledTasks = Array.isArray(parsed.scheduledTasks) ? parsed.scheduledTasks : [];
       const interruptedRuns = runs
         .filter((run): run is RunRecord => Boolean(run && typeof run === "object"))
         .filter((run) => run.status === "running" || run.status === "queued")
@@ -134,6 +148,7 @@ export class RuntimeStatePersister {
 
       const sanitizedSessions = sessions.map((session) => ({
         ...session,
+        cli: normalizeCli((session as Partial<ChatSession>).cli),
         activeRunId: undefined,
         activeTurnId: undefined
       }));
@@ -141,6 +156,7 @@ export class RuntimeStatePersister {
       stores.sessionStore.replaceAll(sanitizedSessions);
       stores.runStore.replaceAll(sanitizedRuns);
       stores.conversationStore.replaceAll(items);
+      stores.scheduledTaskStore.replaceAll(scheduledTasks);
 
       this.logger?.info(
         {
@@ -148,6 +164,7 @@ export class RuntimeStatePersister {
           sessions: sanitizedSessions.length,
           runs: sanitizedRuns.length,
           items: items.length,
+          scheduledTasks: scheduledTasks.length,
           interruptedRuns: interruptedRuns.length
         },
         "已从运行态快照恢复内存状态"
@@ -177,11 +194,12 @@ export class RuntimeStatePersister {
     }
 
     return {
-      version: 1,
+      version: 3,
       savedAt: new Date().toISOString(),
       sessions: this.stores.sessionStore.list(),
       runs: this.stores.runStore.list(),
-      items: this.stores.conversationStore.list()
+      items: this.stores.conversationStore.list(),
+      scheduledTasks: this.stores.scheduledTaskStore.list()
     };
   }
 
@@ -199,7 +217,8 @@ export class RuntimeStatePersister {
         filePath: this.filePath,
         sessions: snapshot.sessions.length,
         runs: snapshot.runs.length,
-        items: snapshot.items.length
+        items: snapshot.items.length,
+        scheduledTasks: snapshot.scheduledTasks.length
       },
       "运行态快照已持久化"
     );

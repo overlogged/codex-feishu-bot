@@ -4,7 +4,7 @@ import type { Client } from "@larksuiteoapi/node-sdk";
 
 import { renderFileMessageContent, renderTextMessageContent } from "./feishu-card-renderer.js";
 import { resolveFeishuFileName, resolveFeishuFileType } from "./feishu-attachment.js";
-import type { FeishuMessageClient } from "./feishu-message-client.js";
+import type { FeishuMessageClient, FeishuTextSendInput } from "./feishu-message-client.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -35,17 +35,28 @@ export class FeishuSdkMessageClient implements FeishuMessageClient {
     throw new Error(`飞书 ${operation} 失败: [${response.code}] ${response.msg ?? "unknown error"}`);
   }
 
-  async sendText(input: { chatId: string; content: string }): Promise<string> {
-    const response = (await this.client.im.v1.message.create({
-      params: {
-        receive_id_type: "chat_id"
-      },
-      data: {
-        receive_id: input.chatId,
-        content: renderTextMessageContent(input.content),
-        msg_type: "text"
-      }
-    })) as FeishuApiResponse<{ message_id?: string }>;
+  async sendText(input: FeishuTextSendInput): Promise<string> {
+    const response = input.replyToMessageId
+      ? ((await this.client.im.v1.message.reply({
+          path: {
+            message_id: input.replyToMessageId
+          },
+          data: {
+            content: renderTextMessageContent(input.content),
+            msg_type: "text",
+            reply_in_thread: input.replyInThread
+          }
+        })) as FeishuApiResponse<{ message_id?: string }>)
+      : ((await this.client.im.v1.message.create({
+          params: {
+            receive_id_type: "chat_id"
+          },
+          data: {
+            receive_id: input.chatId,
+            content: renderTextMessageContent(input.content),
+            msg_type: "text"
+          }
+        })) as FeishuApiResponse<{ message_id?: string }>);
     this.assertSuccess("发送文本消息", response);
 
     const messageId = response.data?.message_id;
@@ -56,7 +67,9 @@ export class FeishuSdkMessageClient implements FeishuMessageClient {
     this.logger.info(
       {
         chatId: input.chatId,
-        messageId
+        messageId,
+        replyToMessageId: input.replyToMessageId,
+        replyInThread: input.replyInThread
       },
       "飞书文本消息发送成功"
     );
