@@ -16,8 +16,10 @@ Set up and deploy a Feishu bot backed by `codex app-server` with as little manua
 6. Run `pnpm chrome:debug`.
 7. Use browser automation through Chrome CDP to configure Feishu Open Platform.
 8. Persist discovered values into `.env.real`.
-9. Start Docker deployment with `pnpm docker:up`.
-10. Verify with `pnpm docker:smoke`.
+9. Start external Codex with `pnpm codex:host`.
+10. Build the app with `pnpm build`.
+11. Start the bot process with `pnpm start`.
+12. Verify with `pnpm host:smoke`.
 
 ## Browser Automation Rules
 
@@ -36,14 +38,16 @@ Only stop for those checkpoints. Do not push routine console clicking back onto 
 
 ## Deployment Rules
 
-- Use the Docker path for setup and validation. Do not default to `pnpm start`.
-- Use the single-container Docker path. Do not reintroduce a `codex-app-server` sidecar deployment mode.
+- Do not start `codex app-server` inside Docker. Start it on the host first with `pnpm codex:host`.
+- The bot process should connect to the external `codex app-server` over `CODEX_APP_SERVER_LISTEN_URL`.
 - Keep runtime secrets in `.env.real`.
-- Keep Codex runtime work under the mounted `/workspace` only. Do not treat the repository checkout as the runtime workspace.
-- Prefer `CODEX_HOME_SOURCE=/absolute/path/to/~/.codex` when local Codex auth already exists; only fall back to `OPENAI_API_KEY` when it does not.
+- Keep Codex runtime work under `DEFAULT_WORKSPACE`, which defaults to `/home/overlogged`. Do not treat the repository checkout as the runtime workspace.
+- Group chats must bind a subdirectory under `DEFAULT_WORKSPACE` before they can start tasks.
+- The group binding flow is: private-chat the bot with `工作区` to get numbered subdirectories, then `@bot <编号>` inside the group to bind it.
+- Default sessions should run in yolo mode: `CODEX_APP_SERVER_APPROVAL_POLICY=never` and `CODEX_APP_SERVER_SANDBOX=danger-full-access`.
 - Keep generated user-facing files under `CODEX_ARTIFACTS_DIR` unless the user explicitly asks to write into the repository itself.
 - Never commit `.env.real` or local browser profile data.
-- Prefer `pnpm docker:*` commands for validation and debugging.
+- Prefer `pnpm host:smoke` plus direct process logs for validation and debugging.
 
 ## Success Criteria
 
@@ -51,6 +55,8 @@ Only stop for those checkpoints. Do not push routine console clicking back onto 
 - `im.message.receive_v1` is subscribed.
 - Required IM permissions are granted.
 - App credentials are present in `.env.real`.
-- `pnpm docker:up` succeeds.
-- `pnpm docker:smoke` succeeds.
+- `pnpm codex:host` succeeds.
+- `pnpm start` succeeds.
+- `pnpm host:smoke` succeeds.
+- Group chats can only run after they are bound to a workspace subdirectory.
 - The user can message the bot in Feishu without additional manual setup.

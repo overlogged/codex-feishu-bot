@@ -100,7 +100,12 @@ function describeToolType(type: string): string {
   }
 }
 
-function buildTurnInput(context: CodexTurnContext, artifactsDir: string) {
+function buildTurnInput(
+  context: CodexTurnContext,
+  artifactsDir: string,
+  feishuBridgeScript: string
+) {
+  const bridgeCommand = `node ${JSON.stringify(feishuBridgeScript)}`;
   const controllerInstructions = [
     "Controller instructions for the Feishu bridge environment:",
     `- You are responding inside Feishu chat ${context.message.chatId}.`,
@@ -117,8 +122,8 @@ function buildTurnInput(context: CodexTurnContext, artifactsDir: string) {
     "- Emit exactly one final_answer for the final user-facing answer.",
     "- Do not repeat commentary or process summaries in final_answer.",
     "- Do not prefix final_answer with labels like '中间过程', '过程同步', '最终结论', or 'Final Answer'; the Feishu UI already labels the message type.",
-    `- If the user should receive a file, run \`node /opt/codex-tools/feishu-bridge.mjs send-file --chat-id ${context.message.chatId} --path <absolute_path>\` after writing it under ${artifactsDir}.`,
-    "- For direct Feishu OpenAPI calls such as Bitable or Sheets, run `node /opt/codex-tools/feishu-bridge.mjs openapi --method <METHOD> --path <OPENAPI_PATH> [--body <JSON>] [--query key=value]...`.",
+    `- If the user should receive a file, run \`${bridgeCommand} send-file --chat-id ${context.message.chatId} --path <absolute_path>\` after writing it under ${artifactsDir}.`,
+    `- For direct Feishu OpenAPI calls such as Bitable or Sheets, run \`${bridgeCommand} openapi --method <METHOD> --path <OPENAPI_PATH> [--body <JSON>] [--query key=value]...\`.`,
     "- Never tell the user to inspect files inside the workspace. Publish them when they matter to the user.",
     "",
     "User message:",
@@ -154,6 +159,7 @@ function buildSteerInput(context: CodexTurnContext) {
 
 export class CodexAppServerWorker implements CodexWorker {
   private child?: ChildProcessWithoutNullStreams;
+  private externalServerReady = false;
 
   constructor(
     private readonly env: Env,
@@ -161,7 +167,23 @@ export class CodexAppServerWorker implements CodexWorker {
   ) {}
 
   async start(): Promise<void> {
-    if (!this.env.CODEX_APP_SERVER_MANAGED || this.child) {
+    if (!this.env.CODEX_APP_SERVER_MANAGED) {
+      if (this.externalServerReady) {
+        return;
+      }
+
+      this.logger?.info(
+        {
+          url: this.env.CODEX_APP_SERVER_LISTEN_URL
+        },
+        "使用外部 codex app-server，启动时先验证连通性"
+      );
+      await this.waitForServer();
+      this.externalServerReady = true;
+      return;
+    }
+
+    if (this.child) {
       return;
     }
 
@@ -627,7 +649,11 @@ export class CodexAppServerWorker implements CodexWorker {
 
       const turnStart = await connection.request<TurnStartResponse>("turn/start", {
         threadId: actualThreadId,
-        input: buildTurnInput(context, this.env.CODEX_ARTIFACTS_DIR),
+        input: buildTurnInput(
+          context,
+          this.env.CODEX_ARTIFACTS_DIR,
+          this.env.FEISHU_BRIDGE_SCRIPT
+        ),
         model: this.env.CODEX_APP_SERVER_MODEL,
         cwd: context.workspaceId,
         approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,

@@ -62,17 +62,43 @@ function createFeishuClient(overrides: Partial<FeishuMessageClient> = {}): Feish
 }
 
 function createWorkspaceResolver(
-  resolveImpl?: ChatWorkspaceResolver["resolve"]
+  overrides: Partial<ChatWorkspaceResolver> = {}
 ): ChatWorkspaceResolver {
   return {
     async resolve(input) {
-      if (resolveImpl) {
-        return resolveImpl(input);
+      if (overrides.resolve) {
+        return overrides.resolve(input);
       }
 
       return {
         ok: true,
         workspaceId: input.session?.workspaceId ?? "/workspace"
+      };
+    },
+    async listCatalog() {
+      if (overrides.listCatalog) {
+        return overrides.listCatalog();
+      }
+
+      return [];
+    },
+    async lookupCatalogEntry(code) {
+      if (overrides.lookupCatalogEntry) {
+        return overrides.lookupCatalogEntry(code);
+      }
+
+      return undefined;
+    },
+    async bindGroupWorkspace(input) {
+      if (overrides.bindGroupWorkspace) {
+        return overrides.bindGroupWorkspace(input);
+      }
+
+      return {
+        ok: false,
+        reason: "invalid_code",
+        detail: "编号不存在",
+        configFilePath: "/workspace/.codex-feishu-bot/chat-workspaces.json"
       };
     }
   };
@@ -397,13 +423,15 @@ test("ChatOrchestrator rejects group messages when workspace is not configured",
     } as never,
     projector,
     codexWorker,
-    createWorkspaceResolver(async () => ({
+    createWorkspaceResolver({
+      resolve: async () => ({
       ok: false,
       reason: "group_workspace_unconfigured",
       configFilePath: "/workspace/.codex-feishu-bot/chat-workspaces.json",
       chatId: "oc_group_1",
       detail: "请先配置工作区"
-    })),
+      })
+    }),
     "/workspace",
     createLogger()
   );
@@ -415,4 +443,150 @@ test("ChatOrchestrator rejects group messages when workspace is not configured",
   assert.equal(runTurnCalls, 0);
   assert.equal(runStore.list().length, 0);
   assert.deepEqual(sentTexts, ["请先配置工作区"]);
+});
+
+test("ChatOrchestrator lists workspace catalog in direct chats without starting a run", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  let runTurnCalls = 0;
+  const sentTexts: string[] = [];
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_workspace_catalog";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({
+      async listCatalog() {
+        return [
+          {
+            code: "1",
+            workspace: "Quant/project-a",
+            workspaceId: "/home/overlogged/Quant/project-a"
+          },
+          {
+            code: "2",
+            workspace: "Quant/project-b",
+            workspaceId: "/home/overlogged/Quant/project-b"
+          }
+        ];
+      }
+    }),
+    "/home/overlogged",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "ou_p2p_1",
+      chatType: "p2p",
+      messageId: "om_p2p_workspace_1",
+      text: "工作区"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(runStore.list().length, 0);
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /1\. Quant\/project-a/);
+  assert.match(sentTexts[0] ?? "", /@机器人 发送编号/);
+});
+
+test("ChatOrchestrator binds group workspace when mentioned with a numeric code", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  let runTurnCalls = 0;
+  const sentTexts: string[] = [];
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_group_bound";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({
+      async bindGroupWorkspace() {
+        return {
+          ok: true,
+          entry: {
+            code: "12",
+            workspace: "Quant/project-a",
+            workspaceId: "/home/overlogged/Quant/project-a"
+          },
+          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
+        };
+      }
+    }),
+    "/home/overlogged",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      messageId: "om_group_bind_1",
+      mentionsBot: true,
+      text: "@托帕 12"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(runStore.list().length, 0);
+  assert.deepEqual(sentTexts, [
+    "已将这个群绑定到工作区 12: Quant/project-a\n后续这个群里的任务都会从 /home/overlogged/Quant/project-a 启动。"
+  ]);
 });

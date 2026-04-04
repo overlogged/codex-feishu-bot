@@ -8,7 +8,8 @@ End state:
 
 - Feishu developer app configured
 - `.env.real` filled
-- Docker deployment up
+- external Codex app-server up
+- bot process up
 - Health and smoke checks passing
 
 ## Required Commands
@@ -42,28 +43,33 @@ agent-browser install
 10. Follow the target state in `docs/feishu-console-automation.md`.
 11. Persist the resulting `FEISHU_APP_ID` and `FEISHU_APP_SECRET` into `.env.real`.
 12. If the user's machine already has `~/.codex/auth.json`, set `CODEX_HOME_SOURCE` in `.env.real` to that absolute host path. Only use `OPENAI_API_KEY` when local Codex auth is missing.
-13. Keep `CODEX_ARTIFACTS_DIR` pointed at the default artifact directory unless the user explicitly wants another export location.
-14. Keep `CODEX_WORKSPACE_HOST_PATH` pointed at the dedicated runtime workspace. Do not mount the repository checkout itself to `/workspace`.
+13. Keep `DEFAULT_WORKSPACE` pointed at `/home/overlogged` unless the user explicitly wants another host root.
+14. Keep `CODEX_ARTIFACTS_DIR` pointed at the default artifact directory unless the user explicitly wants another export location.
+15. Group chats must not run until they are bound to a subdirectory under `DEFAULT_WORKSPACE`.
+16. The group binding flow is: private-chat the bot with `工作区`, then `@bot <编号>` inside the target group.
 
 ## Runtime Setup
 
 After Feishu console setup:
 
 ```bash
-pnpm docker:up
-pnpm docker:smoke
+pnpm codex:host
+pnpm build
+pnpm start
+pnpm host:smoke
 ```
 
 If smoke passes, provide the user with:
 
 - the app name used
 - whether an existing app was reused or a new one was created
-- the Docker status
+- the external Codex status
+- the app process status
 - how to test the bot in Feishu
 
 ## Guardrails
 
 - Do not ask the user to manually configure ordinary Feishu console steps.
-- Do not use `pnpm start` as the primary validation path.
+- Do not put `codex app-server` back inside Docker as the primary path.
 - Do not expose secrets in terminal output beyond what is necessary to write `.env.real`.
 - If tenant policy blocks a permission or release action, explain exactly which screen is blocked and resume after the user resolves it.

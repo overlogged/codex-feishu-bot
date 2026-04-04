@@ -1,5 +1,5 @@
-import { readFile, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { IncomingChatMessage, ChatSession } from "../domain/types.js";
 
@@ -16,6 +16,12 @@ type ChatWorkspaceBindingRecord = Record<
       workspace?: string;
     }
 >;
+
+export interface ChatWorkspaceCatalogEntry {
+  code: string;
+  workspace: string;
+  workspaceId: string;
+}
 
 export type ChatWorkspaceResolution =
   | {
@@ -40,7 +46,39 @@ export interface ChatWorkspaceResolver {
     message: IncomingChatMessage;
     session?: ChatSession;
   }): Promise<ChatWorkspaceResolution>;
+  listCatalog(): Promise<ChatWorkspaceCatalogEntry[]>;
+  lookupCatalogEntry(code: string): Promise<ChatWorkspaceCatalogEntry | undefined>;
+  bindGroupWorkspace(input: {
+    chatId: string;
+    code: string;
+  }): Promise<
+    | {
+        ok: true;
+        entry: ChatWorkspaceCatalogEntry;
+        configFilePath: string;
+      }
+    | {
+        ok: false;
+        reason: "invalid_code" | "catalog_empty" | "config_invalid";
+        detail: string;
+        configFilePath: string;
+      }
+  >;
 }
+
+const MAX_CATALOG_DEPTH = 3;
+const SKIPPED_DIRECTORY_NAMES = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  "artifacts",
+  "tmp",
+  "temp",
+  "vendor",
+  "target",
+  "__pycache__"
+]);
 
 function parseBindingWorkspace(
   value: string | { workspace?: string } | undefined
@@ -58,21 +96,21 @@ function parseBindingWorkspace(
   return undefined;
 }
 
-function renderExample(chatId: string): string {
-  return JSON.stringify(
-    {
-      [chatId]: {
-        workspace: "overlogged/projects/example"
-      }
-    },
-    null,
-    2
-  );
-}
-
 function isWithinWorkspaceRoot(workspaceRoot: string, resolvedWorkspace: string): boolean {
   const relativePath = relative(workspaceRoot, resolvedWorkspace);
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function normalizeRelativePath(pathValue: string): string {
+  return pathValue.split(sep).join("/");
+}
+
+function sortBindings(bindings: ChatWorkspaceBindingRecord): ChatWorkspaceBindingRecord {
+  return Object.fromEntries(Object.entries(bindings).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function shouldIncludeDirectory(name: string): boolean {
+  return !name.startsWith(".") && !SKIPPED_DIRECTORY_NAMES.has(name);
 }
 
 export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
@@ -94,44 +132,22 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       };
     }
 
-    let raw: string;
-    try {
-      raw = await readFile(this.configFilePath, "utf8");
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
+    const bindingsResult = await this.readBindings();
+    if (!bindingsResult.ok) {
+      if (bindingsResult.reason === "missing") {
         return {
           ok: false,
           reason: "group_workspace_unconfigured",
           configFilePath: this.configFilePath,
           chatId: message.chatId,
           detail: [
-            "这个群还没有配置工作区，任务不会启动。",
-            `请先在 ${this.configFilePath} 里为 chatId ${message.chatId} 绑定一个已存在目录。`,
-            "示例：",
-            renderExample(message.chatId)
+            "这个群还没有绑定工作区，任务不会启动。",
+            "先私聊机器人发送“工作区”获取子目录编号。",
+            "再回到群里 @机器人 发送编号完成绑定。"
           ].join("\n")
         };
       }
-      throw error;
-    }
 
-    let bindings: ChatWorkspaceBindingRecord;
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("配置文件顶层必须是 JSON 对象");
-      }
-      bindings = parsed as ChatWorkspaceBindingRecord;
-    } catch (error) {
-      this.logger?.warn(
-        {
-          chatId: message.chatId,
-          configFilePath: this.configFilePath,
-          error: error instanceof Error ? error.message : String(error)
-        },
-        "群工作区配置文件无法解析"
-      );
       return {
         ok: false,
         reason: "group_workspace_invalid",
@@ -144,6 +160,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       };
     }
 
+    const bindings = bindingsResult.bindings;
+
     const configuredWorkspace = parseBindingWorkspace(bindings[message.chatId]);
     if (!configuredWorkspace) {
       return {
@@ -152,10 +170,9 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         configFilePath: this.configFilePath,
         chatId: message.chatId,
         detail: [
-          "这个群还没有配置工作区，任务不会启动。",
-          `请先在 ${this.configFilePath} 里为 chatId ${message.chatId} 绑定一个已存在目录。`,
-          "示例：",
-          renderExample(message.chatId)
+          "这个群还没有绑定工作区，任务不会启动。",
+          "先私聊机器人发送“工作区”获取子目录编号。",
+          "再回到群里 @机器人 发送编号完成绑定。"
         ].join("\n")
       };
     }
@@ -218,5 +235,199 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ok: true,
       workspaceId: resolvedWorkspace
     };
+  }
+
+  async listCatalog(): Promise<ChatWorkspaceCatalogEntry[]> {
+    const workspaces = await this.scanCatalog();
+    return workspaces.map((workspace, index) => ({
+      code: String(index + 1),
+      workspace,
+      workspaceId: resolve(this.defaultWorkspace, workspace)
+    }));
+  }
+
+  async lookupCatalogEntry(code: string): Promise<ChatWorkspaceCatalogEntry | undefined> {
+    const trimmedCode = code.trim();
+    if (!/^\d+$/.test(trimmedCode)) {
+      return undefined;
+    }
+
+    const entries = await this.listCatalog();
+    return entries.find((entry) => entry.code === trimmedCode);
+  }
+
+  async bindGroupWorkspace(input: {
+    chatId: string;
+    code: string;
+  }): Promise<
+    | {
+        ok: true;
+        entry: ChatWorkspaceCatalogEntry;
+        configFilePath: string;
+      }
+    | {
+        ok: false;
+        reason: "invalid_code" | "catalog_empty" | "config_invalid";
+        detail: string;
+        configFilePath: string;
+      }
+  > {
+    const entries = await this.listCatalog();
+    if (entries.length === 0) {
+      return {
+        ok: false,
+        reason: "catalog_empty",
+        detail: [
+          `当前在 ${this.defaultWorkspace} 下没有找到可绑定的子目录。`,
+          "请先创建目录后，再私聊机器人发送“工作区”获取编号。"
+        ].join("\n"),
+        configFilePath: this.configFilePath
+      };
+    }
+
+    const entry = entries.find((item) => item.code === input.code.trim());
+    if (!entry) {
+      return {
+        ok: false,
+        reason: "invalid_code",
+        detail: [
+          `编号 ${input.code.trim()} 不存在。`,
+          "请先私聊机器人发送“工作区”查看最新编号，再回到群里 @机器人 发送编号。"
+        ].join("\n"),
+        configFilePath: this.configFilePath
+      };
+    }
+
+    const bindingsResult = await this.readBindings({ allowMissing: true });
+    if (!bindingsResult.ok) {
+      return {
+        ok: false,
+        reason: "config_invalid",
+        detail: [
+          `工作区配置文件 ${this.configFilePath} 无法解析，暂时不能写入绑定。`,
+          "请先修正这个文件后再重试。"
+        ].join("\n"),
+        configFilePath: this.configFilePath
+      };
+    }
+
+    const bindings: ChatWorkspaceBindingRecord = {
+      ...bindingsResult.bindings,
+      [input.chatId]: {
+        workspace: entry.workspace
+      }
+    };
+
+    await mkdir(dirname(this.configFilePath), {
+      recursive: true
+    });
+    await writeFile(
+      this.configFilePath,
+      `${JSON.stringify(sortBindings(bindings), null, 2)}\n`,
+      "utf8"
+    );
+
+    return {
+      ok: true,
+      entry,
+      configFilePath: this.configFilePath
+    };
+  }
+
+  private async readBindings(options?: { allowMissing?: boolean }): Promise<
+    | {
+        ok: true;
+        bindings: ChatWorkspaceBindingRecord;
+      }
+    | {
+        ok: false;
+        reason: "missing" | "invalid";
+      }
+  > {
+    let raw: string;
+    try {
+      raw = await readFile(this.configFilePath, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        if (options?.allowMissing) {
+          return {
+            ok: true,
+            bindings: {}
+          };
+        }
+
+        return {
+          ok: false,
+          reason: "missing"
+        };
+      }
+      throw error;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("配置文件顶层必须是 JSON 对象");
+      }
+      return {
+        ok: true,
+        bindings: parsed as ChatWorkspaceBindingRecord
+      };
+    } catch (error) {
+      this.logger?.warn(
+        {
+          configFilePath: this.configFilePath,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "群工作区配置文件无法解析"
+      );
+      return {
+        ok: false,
+        reason: "invalid"
+      };
+    }
+  }
+
+  private async scanCatalog(): Promise<string[]> {
+    const entries: string[] = [];
+    await this.collectDirectories("", MAX_CATALOG_DEPTH, entries);
+    return entries;
+  }
+
+  private async collectDirectories(
+    parentRelativePath: string,
+    remainingDepth: number,
+    entries: string[]
+  ): Promise<void> {
+    if (remainingDepth <= 0) {
+      return;
+    }
+
+    const absolutePath = parentRelativePath
+      ? resolve(this.defaultWorkspace, parentRelativePath)
+      : this.defaultWorkspace;
+    const directoryEntries = await readdir(absolutePath, {
+      withFileTypes: true
+    });
+    const childDirectories = directoryEntries
+      .filter((entry) => entry.isDirectory() && shouldIncludeDirectory(entry.name))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+
+    for (const directoryName of childDirectories) {
+      const relativePath = parentRelativePath
+        ? join(parentRelativePath, directoryName)
+        : directoryName;
+      const normalizedRelativePath = normalizeRelativePath(relativePath);
+      const resolvedWorkspace = resolve(this.defaultWorkspace, normalizedRelativePath);
+      const directoryStat = await stat(resolvedWorkspace);
+      if (!directoryStat.isDirectory()) {
+        continue;
+      }
+
+      entries.push(normalizedRelativePath);
+      await this.collectDirectories(normalizedRelativePath, remainingDepth - 1, entries);
+    }
   }
 }

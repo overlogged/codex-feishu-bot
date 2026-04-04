@@ -54,7 +54,7 @@
 把这段 prompt 直接贴给 Codex：
 
 ```text
-打开这个仓库后，严格按照 README.md、AGENTS.md、docs/codex-bootstrap-playbook.md、docs/feishu-console-automation.md 执行。优先走 Docker，不要把普通的控制台配置步骤推回给我。先运行 pnpm install、pnpm bootstrap:env、pnpm chrome:debug。然后先明确问我一个问题：是否要创建新的机器人。如果我回答“要”，就异步执行 `npx -y lark-op-cli@latest create-bot --name "Codex 机器人"` 并持续读取输出；如果过程中出现扫码登录，请把 ASCII 二维码原样转发给我。如果我回答“不要”，再确认我是否已经登录飞书开放平台或 OpenAI/Codex；如果我没登录，再停下来让我登录。登录完成后，就继续走原来的浏览器和 agent-browser / Chrome CDP 方案，只选择已有机器人并完成后续配置，不要再创建新的机器人。拿到 FEISHU_APP_ID 和 FEISHU_APP_SECRET 后写回 .env.real，然后用 Docker 启动并验证服务，最后告诉我怎么在飞书里测试。
+打开这个仓库后，严格按照 README.md、AGENTS.md、docs/codex-bootstrap-playbook.md、docs/feishu-console-automation.md 执行，不要把普通的控制台配置步骤推回给我。先运行 pnpm install、pnpm bootstrap:env、pnpm chrome:debug。然后先明确问我一个问题：是否要创建新的机器人。如果我回答“要”，就异步执行 `npx -y lark-op-cli@latest create-bot --name "Codex 机器人"` 并持续读取输出；如果过程中出现扫码登录，请把 ASCII 二维码原样转发给我。如果我回答“不要”，再确认我是否已经登录飞书开放平台或 OpenAI/Codex；如果我没登录，再停下来让我登录。登录完成后，就继续走原来的浏览器和 agent-browser / Chrome CDP 方案，只选择已有机器人并完成后续配置，不要再创建新的机器人。拿到 FEISHU_APP_ID 和 FEISHU_APP_SECRET 后写回 .env.real，然后在宿主机运行 `pnpm codex:host`、`pnpm build`、`pnpm start`，再用 `pnpm host:smoke` 验证服务，最后告诉我怎么在飞书里测试。群聊工作区绑定必须通过私聊机器人发送“工作区”获取编号，再回群里 `@机器人 编号` 完成。
 ```
 
 同样的 prompt 也单独放在 [docs/codex-bootstrap-prompt.md](docs/codex-bootstrap-prompt.md)。
@@ -65,8 +65,10 @@
 pnpm install
 pnpm bootstrap:env
 pnpm chrome:debug
-pnpm docker:up
-pnpm docker:smoke
+pnpm codex:host
+pnpm build
+pnpm start
+pnpm host:smoke
 ```
 
 ## 关键文档
@@ -94,31 +96,33 @@ agent-browser --cdp 9222 open https://open.feishu.cn/app
 
 如果 `agent-browser` 不在机器上，Codex 也可以用任何可用的 CDP/DevTools 能力，只要它真的去操作浏览器，而不是让用户手动点一遍。
 
-## Docker 运行架构
+## Host 运行架构
 
 ```mermaid
 flowchart LR
   U["Feishu 用户 / 群聊"] --> F["Feishu 长连接事件"]
-  F --> A["app 容器"]
-  A --> O["OpenAI / Codex"]
+  F --> A["宿主机 app 进程"]
+  A --> C["宿主机 codex app-server"]
+  C --> O["OpenAI / Codex"]
   A --> M["Feishu OpenAPI 发消息 / 更新卡片 / 发文件"]
   M --> U
 ```
 
-唯一的正式运行路径是单容器：
+默认运行路径是宿主机双进程：
 
-- `app`：同时包含 Node 服务和 `codex` CLI，由应用进程托管启动 `codex app-server`
+- `codex app-server`：先在宿主机独立启动
+- `app`：Node 服务，连接外部 `codex app-server`
 
 对应命令：
 
 ```bash
-pnpm docker:up
-pnpm docker:logs
-pnpm docker:smoke
-pnpm docker:down
+pnpm codex:host
+pnpm build
+pnpm start
+pnpm host:smoke
 ```
 
-这个 compose 不会把整个仓库根目录挂到 `/workspace`。`/workspace` 是专门给 Codex 的运行工作目录。
+默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的子目录，不能直接把仓库根目录当运行工作区。
 
 ## 环境变量
 
@@ -139,7 +143,8 @@ pnpm bootstrap:env
 - `FEISHU_APP_ID`
 - `FEISHU_APP_SECRET`
 - `CODEX_HOME_SOURCE` 或 `OPENAI_API_KEY`
-- `CODEX_WORKSPACE_HOST_PATH`
+- `DEFAULT_WORKSPACE`
+- `CHAT_WORKSPACE_BINDINGS_FILE`
 - `CODEX_ARTIFACTS_DIR`
 - `RUNTIME_STATE_FILE`
 

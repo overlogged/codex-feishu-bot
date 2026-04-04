@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -125,5 +125,58 @@ test("FileBackedChatWorkspaceResolver allows direct messages to use the default 
   assert.deepEqual(result, {
     ok: true,
     workspaceId: workspaceRoot
+  });
+});
+
+test("FileBackedChatWorkspaceResolver lists numbered workspace catalog entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+
+  await mkdir(join(workspaceRoot, "Quant", "project-a"), { recursive: true });
+  await mkdir(join(workspaceRoot, "Quant", "project-b"), { recursive: true });
+
+  const resolver = new FileBackedChatWorkspaceResolver(
+    workspaceRoot,
+    join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json")
+  );
+  const entries = await resolver.listCatalog();
+
+  assert.deepEqual(
+    entries.map((entry) => entry.workspace),
+    ["Quant", "Quant/project-a", "Quant/project-b"]
+  );
+  assert.deepEqual(
+    entries.map((entry) => entry.code),
+    ["1", "2", "3"]
+  );
+});
+
+test("FileBackedChatWorkspaceResolver binds a group to a numbered workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(join(workspaceRoot, "Quant", "project-a"), { recursive: true });
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const bindResult = await resolver.bindGroupWorkspace({
+    chatId: "oc_group_1",
+    code: "2"
+  });
+
+  assert.equal(bindResult.ok, true);
+  if (!bindResult.ok) {
+    throw new Error("expected bindGroupWorkspace to succeed");
+  }
+  assert.equal(bindResult.entry.workspace, "Quant/project-a");
+
+  const persistedBindings = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
+    string,
+    { workspace: string }
+  >;
+  assert.deepEqual(persistedBindings, {
+    oc_group_1: {
+      workspace: "Quant/project-a"
+    }
   });
 });

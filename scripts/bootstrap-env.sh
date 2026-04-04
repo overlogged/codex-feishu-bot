@@ -25,5 +25,6 @@ echo
 echo "Next steps:"
 echo "  1. Run pnpm chrome:debug"
 echo "  2. Let Codex configure Feishu Open Platform and write FEISHU_APP_ID / FEISHU_APP_SECRET into .env.real"
-echo "  3. Run pnpm docker:up"
-echo "  4. Run pnpm docker:smoke"
+echo "  3. Run pnpm codex:host"
+echo "  4. Run pnpm build"
+echo "  5. Run pnpm start"

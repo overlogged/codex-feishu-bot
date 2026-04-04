@@ -3,7 +3,13 @@ import { isAbsolute, resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 
-loadDotenv();
+loadDotenv({
+  path: ".env"
+});
+loadDotenv({
+  path: ".env.real",
+  override: true
+});
 
 const envBoolean = (defaultValue: boolean) =>
   z.preprocess((value) => {
@@ -41,7 +47,7 @@ const envSchema = z.object({
   CODEX_APP_SERVER_COMMAND: z.string().default("codex"),
   CODEX_APP_SERVER_ARGS: z.string().default("app-server"),
   CODEX_APP_SERVER_LISTEN_URL: z.string().url().default("ws://127.0.0.1:4500"),
-  CODEX_APP_SERVER_MANAGED: envBoolean(true),
+  CODEX_APP_SERVER_MANAGED: envBoolean(false),
   CODEX_APP_SERVER_MODEL: z.string().default("gpt-5.4"),
   CODEX_APP_SERVER_APPROVAL_POLICY: z
     .enum(["untrusted", "on-failure", "on-request", "never"])
@@ -49,10 +55,11 @@ const envSchema = z.object({
   CODEX_APP_SERVER_SANDBOX: z
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .default("danger-full-access"),
-  DEFAULT_WORKSPACE: z.string().default(process.cwd()),
+  DEFAULT_WORKSPACE: z.string().default("/home/overlogged"),
   CHAT_WORKSPACE_BINDINGS_FILE: z.string().default(".codex-feishu-bot/chat-workspaces.json"),
-  CODEX_ARTIFACTS_DIR: z.string().default(".codex-local/artifacts"),
+  CODEX_ARTIFACTS_DIR: z.string().default(".codex-feishu-bot/artifacts"),
   RUNTIME_STATE_FILE: z.string().default(".codex-feishu-bot/runtime-state.json"),
+  FEISHU_BRIDGE_SCRIPT: z.string().default("scripts/feishu-bridge.mjs"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
   FEISHU_PROVIDER: z.enum(["sdk", "fake"]).default("sdk"),
   FEISHU_TRANSPORT: z.enum(["websocket", "webhook", "disabled"]).default("websocket"),
@@ -79,6 +86,7 @@ export function readEnv(): Env {
     DEFAULT_WORKSPACE: defaultWorkspace,
     CHAT_WORKSPACE_BINDINGS_FILE: resolveDir(defaultWorkspace, parsed.CHAT_WORKSPACE_BINDINGS_FILE),
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
-    RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE)
+    RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE),
+    FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT)
   };
 }

@@ -45,6 +45,7 @@ RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
 COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY scripts/feishu-bridge.mjs ./scripts/feishu-bridge.mjs
 COPY scripts/start-codex-app-server.sh /usr/local/bin/start-codex-app-server
 COPY scripts/feishu-bridge.mjs /opt/codex-tools/feishu-bridge.mjs
 

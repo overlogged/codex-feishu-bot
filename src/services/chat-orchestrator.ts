@@ -14,6 +14,21 @@ interface LoggerLike {
   error(message: unknown, ...args: unknown[]): void;
 }
 
+const WORKSPACE_CATALOG_COMMAND = /^(工作区|workspace|workspaces)$/i;
+
+function isWorkspaceCatalogCommand(text: string): boolean {
+  return WORKSPACE_CATALOG_COMMAND.test(text.trim());
+}
+
+function extractGroupBindingCode(message: IncomingChatMessage): string | undefined {
+  if (message.chatType !== "group" || !message.mentionsBot) {
+    return undefined;
+  }
+
+  const strippedText = message.text.replace(/@\S+/g, " ").trim();
+  return /^\d+$/.test(strippedText) ? strippedText : undefined;
+}
+
 export class ChatOrchestrator {
   private readonly seenIncomingMessages = new Map<string, number>();
 
@@ -72,6 +87,10 @@ export class ChatOrchestrator {
   }
 
   private async processIncomingMessage(message: IncomingChatMessage): Promise<void> {
+    if (await this.handleWorkspaceManagementMessage(message)) {
+      return;
+    }
+
     const existingSession = this.sessionStore.get(message.chatId);
     const workspaceResolution = await this.workspaceResolver.resolve({
       message,
@@ -287,6 +306,46 @@ export class ChatOrchestrator {
       runs: this.runStore.list(),
       items: this.conversationStore.list()
     };
+  }
+
+  private async handleWorkspaceManagementMessage(message: IncomingChatMessage): Promise<boolean> {
+    if (message.chatType === "p2p" && isWorkspaceCatalogCommand(message.text)) {
+      const entries = await this.workspaceResolver.listCatalog();
+      const content =
+        entries.length === 0
+          ? [
+              `当前在 ${this.defaultWorkspace} 下没有可绑定的子目录。`,
+              "请先创建目录后，再回来发送“工作区”。"
+            ].join("\n")
+          : [
+              `可绑定的工作区编号如下，根目录是 ${this.defaultWorkspace}：`,
+              ...entries.map((entry) => `${entry.code}. ${entry.workspace}`),
+              "",
+              "在目标群里 @机器人 发送编号即可绑定，例如：@机器人 12"
+            ].join("\n");
+      await this.notifyWorkspaceRequirement(message, content);
+      return true;
+    }
+
+    const bindingCode = extractGroupBindingCode(message);
+    if (!bindingCode) {
+      return false;
+    }
+
+    const result = await this.workspaceResolver.bindGroupWorkspace({
+      chatId: message.chatId,
+      code: bindingCode
+    });
+    if (!result.ok) {
+      await this.notifyWorkspaceRequirement(message, result.detail);
+      return true;
+    }
+
+    await this.notifyWorkspaceRequirement(
+      message,
+      `已将这个群绑定到工作区 ${result.entry.code}: ${result.entry.workspace}\n后续这个群里的任务都会从 ${result.entry.workspaceId} 启动。`
+    );
+    return true;
   }
 
   private isDuplicateIncomingMessage(message: IncomingChatMessage): boolean {
