@@ -1,9 +1,12 @@
 export const CHAT_CLI_VALUES = ["codex", "claude", "kimi"] as const;
 export type ChatCli = (typeof CHAT_CLI_VALUES)[number];
+export const CHAT_EXECUTION_MODE_VALUES = ["host", "docker"] as const;
+export type ChatExecutionMode = (typeof CHAT_EXECUTION_MODE_VALUES)[number];
 
 export interface IncomingChatMessage {
   chatId: string;
   chatType: string;
+  chatName?: string;
   messageId: string;
   senderId: string;
   senderName: string;
@@ -19,8 +22,18 @@ export interface ChatSession {
   threadId: string;
   cli: ChatCli;
   workspaceId: string;
+  executionMode?: ChatExecutionMode;
+  chatType?: string;
+  chatName?: string;
+  chatDisplayName?: string;
   activeRunId?: string;
   activeTurnId?: string;
+  lastInboundAt?: string;
+  lastSenderId?: string;
+  lastSenderName?: string;
+  lastMessageId?: string;
+  lastMessagePreview?: string;
+  lastUserMessagePreview?: string;
   updatedAt: string;
 }
 

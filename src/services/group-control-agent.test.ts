@@ -39,7 +39,7 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"claude","code":"2"}'
+        text: '{"kind":"bind_workspace","cli":"claude","executionMode":"host","code":"2"}'
       };
     }
   };
@@ -68,6 +68,7 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
   assert.deepEqual(intent, {
     kind: "bind_workspace",
     cli: "claude",
+    executionMode: "host",
     code: "2"
   });
   assert.equal(ensureThreadCalls, 0);

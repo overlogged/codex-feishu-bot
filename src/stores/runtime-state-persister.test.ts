@@ -122,3 +122,84 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
   assert.match(raw, /"status":"failed"/);
   assert.match(raw, /"scheduledTasks"/);
 });
+
+test("RuntimeStatePersister serializes overlapping writes that target the same snapshot", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "codex-feishu-state-"));
+  const filePath = join(tempDir, "runtime-state.json");
+
+  const persister = new RuntimeStatePersister(filePath, undefined, 0);
+  const persist = () => persister.scheduleSave();
+  const sessionStore = new SessionStore(persist);
+  const runStore = new RunStore(persist);
+  const conversationStore = new ConversationStore(persist);
+  const scheduledTaskStore = new ScheduledTaskStore(persist);
+
+  persister.attach({
+    sessionStore,
+    runStore,
+    conversationStore,
+    scheduledTaskStore
+  });
+
+  let activeWrites = 0;
+  let maxActiveWrites = 0;
+  let writeCalls = 0;
+  let markFirstWriteStarted: (() => void) | undefined;
+  const firstWriteStarted = new Promise<void>((resolve) => {
+    markFirstWriteStarted = resolve;
+  });
+  let releaseFirstWrite: (() => void) | undefined;
+  const firstWriteMayFinish = new Promise<void>((resolve) => {
+    releaseFirstWrite = resolve;
+  });
+  const originalWriteSnapshot = (
+    persister as unknown as { writeSnapshot: () => Promise<void> }
+  ).writeSnapshot.bind(persister);
+
+  (persister as unknown as { writeSnapshot: () => Promise<void> }).writeSnapshot = async () => {
+    writeCalls += 1;
+    activeWrites += 1;
+    maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+
+    if (writeCalls === 1) {
+      markFirstWriteStarted?.();
+      await firstWriteMayFinish;
+    }
+
+    try {
+      await originalWriteSnapshot();
+    } finally {
+      activeWrites -= 1;
+    }
+  };
+
+  sessionStore.save({
+    chatId: "oc_chat_1",
+    threadId: "thread_1",
+    cli: "codex",
+    workspaceId: "/workspace",
+    updatedAt: "2026-03-09T00:00:00.000Z"
+  });
+
+  await firstWriteStarted;
+
+  runStore.save({
+    runId: "run_1",
+    chatId: "oc_chat_1",
+    threadId: "thread_1",
+    sourceMessageId: "om_1",
+    status: "completed",
+    startedAt: "2026-03-09T00:00:00.000Z",
+    updatedAt: "2026-03-09T00:00:01.000Z"
+  });
+
+  const flushPromise = persister.flush();
+  releaseFirstWrite?.();
+  await flushPromise;
+
+  assert.equal(writeCalls, 2);
+  assert.equal(maxActiveWrites, 1);
+
+  const raw = await readFile(filePath, "utf8");
+  assert.match(raw, /"runId":"run_1"/);
+});

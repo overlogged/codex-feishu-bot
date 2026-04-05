@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type {
   ChatCli,
+  ChatExecutionMode,
   ConversationItem,
   RunRecord,
   ChatSession,
@@ -50,9 +52,14 @@ function normalizeCli(value: unknown): ChatCli {
   return value === "claude" || value === "kimi" ? value : "codex";
 }
 
+function normalizeExecutionMode(value: unknown): ChatExecutionMode {
+  return value === "docker" ? "docker" : "host";
+}
+
 export class RuntimeStatePersister {
   private timer?: NodeJS.Timeout;
-  private flushPromise?: Promise<void>;
+  private latestWrite?: Promise<void>;
+  private writeQueue: Promise<void> = Promise.resolve();
   private readonly debounceMs: number;
   private stores?: RuntimeStores;
 
@@ -79,9 +86,7 @@ export class RuntimeStatePersister {
 
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.flushPromise = this.writeSnapshot().finally(() => {
-        this.flushPromise = undefined;
-      });
+      this.startQueuedWrite({ logErrors: true });
     }, this.debounceMs);
   }
 
@@ -89,12 +94,11 @@ export class RuntimeStatePersister {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
-      this.flushPromise = this.writeSnapshot().finally(() => {
-        this.flushPromise = undefined;
-      });
+      await this.startQueuedWrite({ logErrors: false });
+      return;
     }
 
-    await this.flushPromise;
+    await this.latestWrite;
   }
 
   async restore(stores: RuntimeStores): Promise<RuntimeRestoreResult> {
@@ -149,6 +153,7 @@ export class RuntimeStatePersister {
       const sanitizedSessions = sessions.map((session) => ({
         ...session,
         cli: normalizeCli((session as Partial<ChatSession>).cli),
+        executionMode: normalizeExecutionMode((session as Partial<ChatSession>).executionMode),
         activeRunId: undefined,
         activeTurnId: undefined
       }));
@@ -203,10 +208,39 @@ export class RuntimeStatePersister {
     };
   }
 
+  private startQueuedWrite(options: { logErrors: boolean }): Promise<void> {
+    const writePromise = this.writeQueue
+      .catch(() => undefined)
+      .then(() => this.writeSnapshot());
+
+    this.writeQueue = writePromise;
+    this.latestWrite = writePromise;
+
+    if (options.logErrors) {
+      void writePromise.catch((error) => {
+        this.logger?.error(
+          {
+            filePath: this.filePath,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          "运行态快照持久化失败"
+        );
+      });
+    }
+
+    void writePromise.finally(() => {
+      if (this.latestWrite === writePromise) {
+        this.latestWrite = undefined;
+      }
+    });
+
+    return writePromise;
+  }
+
   private async writeSnapshot(): Promise<void> {
     const snapshot = this.snapshot();
     const dir = dirname(this.filePath);
-    const tempFile = `${this.filePath}.tmp`;
+    const tempFile = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
 
     await mkdir(dir, { recursive: true });
     await writeFile(tempFile, JSON.stringify(snapshot), "utf8");

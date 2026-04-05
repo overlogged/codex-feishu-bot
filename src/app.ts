@@ -8,6 +8,8 @@ import type { Env } from "./config/env.js";
 import { CodexAppServerWorker } from "./integrations/codex/app-server-worker.js";
 import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
+import { DockerCodexAppServerWorker } from "./integrations/codex/docker-codex-app-server-worker.js";
+import { ExecutionModeRoutedCodexWorker } from "./integrations/codex/execution-mode-routed-worker.js";
 import { KimiCliWorker } from "./integrations/codex/kimi-cli-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
 import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
@@ -17,13 +19,16 @@ import {
   createFeishuOpenApiClient,
   hasFeishuCredentials
 } from "./integrations/feishu/feishu-openapi-client.js";
+import { FeishuSessionMetadataProvider } from "./integrations/feishu/feishu-session-metadata-provider.js";
 import { ConsoleFeishuMessageClient } from "./integrations/feishu/feishu-message-client.js";
 import type { FeishuMessageClient } from "./integrations/feishu/feishu-message-client.js";
 import { FeishuSdkMessageClient } from "./integrations/feishu/feishu-sdk-message-client.js";
 import { FeishuWsSubscriber } from "./integrations/feishu/feishu-ws-subscriber.js";
+import { registerAgentManagerRoutes } from "./routes/agent-manager.js";
 import { registerDebugRoutes } from "./routes/debug.js";
 import { registerFeishuRoutes } from "./routes/feishu.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { AgentManagerService } from "./services/agent-manager-service.js";
 import { ChatScheduleService } from "./services/chat-schedule-service.js";
 import { ChatOrchestrator } from "./services/chat-orchestrator.js";
 import { CodexGroupControlAgent } from "./services/group-control-agent.js";
@@ -44,17 +49,25 @@ interface LoggerLike {
 
 function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
   if (env.CODEX_MODE === "app-server") {
-    return new MultiCliWorker({
-      codex: new CodexAppServerWorker(env, logger),
-      claude: new ClaudeCliWorker(env, logger),
-      kimi: new KimiCliWorker(env, logger)
-    });
+    return new ExecutionModeRoutedCodexWorker(
+      new MultiCliWorker({
+        codex: new CodexAppServerWorker(env, logger),
+        claude: new ClaudeCliWorker(env, logger),
+        kimi: new KimiCliWorker(env, logger)
+      }),
+      new DockerCodexAppServerWorker(env, logger),
+      logger
+    );
   }
 
   return new MockCodexWorker();
 }
 
-function buildFeishuMessageClient(env: Env, logger: LoggerLike): FeishuMessageClient {
+function buildFeishuMessageClient(
+  env: Env,
+  logger: LoggerLike,
+  client?: ReturnType<typeof createFeishuOpenApiClient>
+): FeishuMessageClient {
   if (env.FEISHU_PROVIDER === "fake") {
     return new FakeFeishuMessageClient(env.FAKE_FEISHU_BASE_URL);
   }
@@ -63,7 +76,7 @@ function buildFeishuMessageClient(env: Env, logger: LoggerLike): FeishuMessageCl
     return new ConsoleFeishuMessageClient();
   }
 
-  return new FeishuSdkMessageClient(createFeishuOpenApiClient(env), logger);
+  return new FeishuSdkMessageClient(client ?? createFeishuOpenApiClient(env), logger);
 }
 
 export interface AppRuntime {
@@ -97,7 +110,11 @@ export function buildAppRuntime(env: Env): AppRuntime {
     conversationStore,
     scheduledTaskStore
   });
-  const feishuClient = buildFeishuMessageClient(env, app.log);
+  const feishuOpenApiClient =
+    env.FEISHU_PROVIDER === "fake" || !hasFeishuCredentials(env)
+      ? undefined
+      : createFeishuOpenApiClient(env);
+  const feishuClient = buildFeishuMessageClient(env, app.log, feishuOpenApiClient);
   const workspaceResolver = new FileBackedChatWorkspaceResolver(
     env.DEFAULT_WORKSPACE,
     env.CHAT_WORKSPACE_BINDINGS_FILE,
@@ -131,8 +148,20 @@ export function buildAppRuntime(env: Env): AppRuntime {
     app.log,
     groupControlAgent
   );
+  const agentManager = new AgentManagerService(
+    env.DEFAULT_WORKSPACE,
+    sessionStore,
+    runStore,
+    conversationStore,
+    feishuClient,
+    orchestrator,
+    feishuOpenApiClient ? new FeishuSessionMetadataProvider(feishuOpenApiClient, app.log) : undefined
+  );
 
   void registerHealthRoutes(app);
+  void registerAgentManagerRoutes(app, {
+    agentManager
+  });
   void registerDebugRoutes(app, {
     orchestrator
   });

@@ -4,7 +4,9 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.111.0}
+        HOST_RUNTIME_IMAGE: ${HOST_RUNTIME_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/ubuntu:24.04}
+        NODE_VERSION: ${NODE_VERSION:-24.14.0}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.118.0}
     restart: unless-stopped
     init: true
     environment:

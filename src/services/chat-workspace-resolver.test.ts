@@ -48,7 +48,8 @@ test("FileBackedChatWorkspaceResolver resolves a configured existing group works
   assert.deepEqual(result, {
     ok: true,
     workspaceId: actualWorkspace,
-    cli: "codex"
+    cli: "codex",
+    executionMode: "host"
   });
 });
 
@@ -126,7 +127,8 @@ test("FileBackedChatWorkspaceResolver allows direct messages to use the default 
   assert.deepEqual(result, {
     ok: true,
     workspaceId: workspaceRoot,
-    cli: "codex"
+    cli: "codex",
+    executionMode: "host"
   });
 });
 
@@ -156,14 +158,16 @@ test("FileBackedChatWorkspaceResolver defaults legacy group bindings to codex", 
   assert.deepEqual(result, {
     ok: true,
     workspaceId: actualWorkspace,
-    cli: "codex"
+    cli: "codex",
+    executionMode: "host"
   });
 
   const normalized = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
     string,
-    { workspace: string; cli: string }
+    { workspace: string; cli: string; executionMode: string }
   >;
   assert.equal(normalized.oc_group_1?.cli, "codex");
+  assert.equal(normalized.oc_group_1?.executionMode, "host");
 });
 
 test("FileBackedChatWorkspaceResolver lists numbered workspace catalog entries", async () => {
@@ -201,6 +205,7 @@ test("FileBackedChatWorkspaceResolver binds a group to a numbered workspace", as
   const bindResult = await resolver.bindGroupWorkspace({
     chatId: "oc_group_1",
     cli: "claude",
+    executionMode: "host",
     code: "1"
   });
 
@@ -212,12 +217,78 @@ test("FileBackedChatWorkspaceResolver binds a group to a numbered workspace", as
 
   const persistedBindings = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
     string,
-    { workspace: string; cli: string }
+    { workspace: string; cli: string; executionMode: string }
   >;
   assert.deepEqual(persistedBindings, {
     oc_group_1: {
       workspace: "Quant",
-      cli: "claude"
+      cli: "claude",
+      executionMode: "host"
     }
   });
+});
+
+test("FileBackedChatWorkspaceResolver supports docker mode for codex bindings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const actualWorkspace = join(workspaceRoot, "Quant");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(actualWorkspace, { recursive: true });
+  await mkdir(join(workspaceRoot, ".codex-feishu-bot"), { recursive: true });
+  await writeFile(
+    configFilePath,
+    JSON.stringify({
+      oc_group_1: {
+        workspace: "Quant",
+        cli: "codex",
+        executionMode: "docker"
+      }
+    }),
+    "utf8"
+  );
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.resolve({
+    message: createMessage()
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    workspaceId: actualWorkspace,
+    cli: "codex",
+    executionMode: "docker"
+  });
+});
+
+test("FileBackedChatWorkspaceResolver rejects docker mode for non-codex CLIs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const actualWorkspace = join(workspaceRoot, "Quant");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(actualWorkspace, { recursive: true });
+  await mkdir(join(workspaceRoot, ".codex-feishu-bot"), { recursive: true });
+  await writeFile(
+    configFilePath,
+    JSON.stringify({
+      oc_group_1: {
+        workspace: "Quant",
+        cli: "claude",
+        executionMode: "docker"
+      }
+    }),
+    "utf8"
+  );
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.resolve({
+    message: createMessage()
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) {
+    throw new Error("expected unsupported docker binding to fail");
+  }
+  assert.match(result.detail, /docker 模式暂时只支持 codex/);
 });

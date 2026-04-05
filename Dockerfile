@@ -1,3 +1,5 @@
+ARG HOST_RUNTIME_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/ubuntu:24.04
+
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
@@ -16,9 +18,10 @@ COPY src ./src
 RUN pnpm build
 RUN pnpm prune --prod
 
-FROM node:22-bookworm-slim AS runtime
+FROM ${HOST_RUNTIME_IMAGE} AS runtime
 
-ARG CODEX_CLI_VERSION=0.111.0
+ARG NODE_VERSION=24.14.0
+ARG CODEX_CLI_VERSION=0.118.0
 
 WORKDIR /app
 
@@ -38,9 +41,20 @@ RUN apt-get update \
     g++ \
     ripgrep \
     wget \
+    xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+  && mkdir -p /usr/local/lib/nodejs \
+  && tar -xJf /tmp/node.tar.xz -C /usr/local/lib/nodejs \
+  && ln -sf "/usr/local/lib/nodejs/node-v${NODE_VERSION}-linux-x64/bin/node" /usr/local/bin/node \
+  && ln -sf "/usr/local/lib/nodejs/node-v${NODE_VERSION}-linux-x64/bin/npm" /usr/local/bin/npm \
+  && ln -sf "/usr/local/lib/nodejs/node-v${NODE_VERSION}-linux-x64/bin/npx" /usr/local/bin/npx \
+  && ln -sf "/usr/local/lib/nodejs/node-v${NODE_VERSION}-linux-x64/bin/corepack" /usr/local/bin/corepack \
+  && rm -f /tmp/node.tar.xz
+
+RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+  && ln -sf "/usr/local/lib/nodejs/node-v${NODE_VERSION}-linux-x64/bin/codex" /usr/local/bin/codex
 
 COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules

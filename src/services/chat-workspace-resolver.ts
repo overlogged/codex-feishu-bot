@@ -3,7 +3,9 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import {
   CHAT_CLI_VALUES,
+  CHAT_EXECUTION_MODE_VALUES,
   type ChatCli,
+  type ChatExecutionMode,
   type IncomingChatMessage,
   type ChatSession
 } from "../domain/types.js";
@@ -20,6 +22,7 @@ type ChatWorkspaceBindingRecord = Record<
   | {
       workspace?: string;
       cli?: string;
+      executionMode?: string;
     }
 >;
 
@@ -33,6 +36,8 @@ interface ParsedChatBinding {
   workspace?: string;
   cli?: ChatCli;
   rawCli?: string;
+  executionMode?: ChatExecutionMode;
+  rawExecutionMode?: string;
 }
 
 export type ChatWorkspaceResolution =
@@ -40,6 +45,7 @@ export type ChatWorkspaceResolution =
       ok: true;
       workspaceId: string;
       cli: ChatCli;
+      executionMode: ChatExecutionMode;
     }
   | {
       ok: false;
@@ -64,17 +70,19 @@ export interface ChatWorkspaceResolver {
   bindGroupWorkspace(input: {
     chatId: string;
     cli: ChatCli;
+    executionMode: ChatExecutionMode;
     code: string;
   }): Promise<
     | {
         ok: true;
         entry: ChatWorkspaceCatalogEntry;
         cli: ChatCli;
+        executionMode: ChatExecutionMode;
         configFilePath: string;
       }
     | {
         ok: false;
-        reason: "invalid_code" | "catalog_empty" | "config_invalid";
+        reason: "invalid_code" | "catalog_empty" | "config_invalid" | "unsupported_execution_mode";
         detail: string;
         configFilePath: string;
       }
@@ -95,13 +103,24 @@ const SKIPPED_DIRECTORY_NAMES = new Set([
 ]);
 
 const SUPPORTED_CHAT_CLIS = new Set<ChatCli>(CHAT_CLI_VALUES);
+const SUPPORTED_EXECUTION_MODES = new Set<ChatExecutionMode>(CHAT_EXECUTION_MODE_VALUES);
 
-function parseBindingWorkspace(value: string | { workspace?: string; cli?: string } | undefined): ParsedChatBinding {
+function parseBindingWorkspace(
+  value:
+    | string
+    | {
+        workspace?: string;
+        cli?: string;
+        executionMode?: string;
+      }
+    | undefined
+): ParsedChatBinding {
   if (typeof value === "string") {
     const trimmed = value.trim();
     return {
       workspace: trimmed || undefined,
-      cli: "codex"
+      cli: "codex",
+      executionMode: "host"
     };
   }
 
@@ -119,11 +138,21 @@ function parseBindingWorkspace(value: string | { workspace?: string; cli?: strin
       : value.cli === undefined
         ? "codex"
         : undefined;
+  const executionMode =
+    typeof value.executionMode === "string" &&
+    SUPPORTED_EXECUTION_MODES.has(value.executionMode as ChatExecutionMode)
+      ? (value.executionMode as ChatExecutionMode)
+      : value.executionMode === undefined
+        ? "host"
+        : undefined;
 
   return {
     workspace,
     cli,
-    rawCli: typeof value.cli === "string" ? value.cli.trim() || undefined : undefined
+    rawCli: typeof value.cli === "string" ? value.cli.trim() || undefined : undefined,
+    executionMode,
+    rawExecutionMode:
+      typeof value.executionMode === "string" ? value.executionMode.trim() || undefined : undefined
   };
 }
 
@@ -157,13 +186,18 @@ function normalizeBindings(bindings: ChatWorkspaceBindingRecord): {
       return [chatId, value] as const;
     }
 
-    if (typeof value.workspace === "string" && value.workspace.trim() && value.cli === undefined) {
+    if (
+      typeof value.workspace === "string" &&
+      value.workspace.trim() &&
+      (value.cli === undefined || value.executionMode === undefined)
+    ) {
       changed = true;
       return [
         chatId,
         {
           workspace: value.workspace.trim(),
-          cli: "codex"
+          cli: value.cli ?? "codex",
+          executionMode: value.executionMode ?? "host"
         }
       ] as const;
     }
@@ -197,7 +231,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       return {
         ok: true,
         workspaceId: session?.workspaceId ?? this.defaultWorkspace,
-        cli: "codex"
+        cli: "codex",
+        executionMode: "host"
       };
     }
 
@@ -211,8 +246,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
           chatId: message.chatId,
           detail: [
             "这个群还没有绑定工作区，任务不会启动。",
-            "直接在群里 @机器人 说“看看有哪些工作区”或“把这个群绑定到 codex 的 Quant”。",
-            "群里 @机器人的消息会进入配置控制线程。"
+            "直接在群里 @机器人 说“看看有哪些工作区”或“把这个群绑定到 codex 的 Quant”。"
           ].join("\n")
         };
       }
@@ -240,8 +274,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         chatId: message.chatId,
         detail: [
           "这个群还没有绑定工作区，任务不会启动。",
-          "直接在群里 @机器人 说“看看有哪些工作区”或“把这个群绑定到 codex 的 Quant”。",
-          "群里 @机器人的消息会进入配置控制线程。"
+          "直接在群里 @机器人 说“看看有哪些工作区”或“把这个群绑定到 codex 的 Quant”。"
         ].join("\n")
       };
     }
@@ -256,6 +289,34 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         detail: [
           `这个群配置的 CLI 是 ${configuredBinding.rawCli ?? "空值"}，但当前只支持 ${CHAT_CLI_VALUES.join(" / ")}。`,
           `请修正 ${this.configFilePath} 里的 cli 字段后再重试。`
+        ].join("\n")
+      };
+    }
+
+    if (!configuredBinding.executionMode) {
+      return {
+        ok: false,
+        reason: "group_workspace_invalid",
+        configFilePath: this.configFilePath,
+        chatId: message.chatId,
+        configuredWorkspace: configuredBinding.workspace,
+        detail: [
+          `这个群配置的执行模式是 ${configuredBinding.rawExecutionMode ?? "空值"}，但当前只支持 ${CHAT_EXECUTION_MODE_VALUES.join(" / ")}。`,
+          `请修正 ${this.configFilePath} 里的 executionMode 字段后再重试。`
+        ].join("\n")
+      };
+    }
+
+    if (configuredBinding.executionMode === "docker" && configuredBinding.cli !== "codex") {
+      return {
+        ok: false,
+        reason: "group_workspace_invalid",
+        configFilePath: this.configFilePath,
+        chatId: message.chatId,
+        configuredWorkspace: configuredBinding.workspace,
+        detail: [
+          `这个群当前配置的是 ${configuredBinding.cli} + docker，但 docker 模式暂时只支持 codex。`,
+          `请把 ${this.configFilePath} 里的 cli 改成 codex，或者把 executionMode 改回 host。`
         ].join("\n")
       };
     }
@@ -317,7 +378,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     return {
       ok: true,
       workspaceId: resolvedWorkspace,
-      cli: configuredBinding.cli
+      cli: configuredBinding.cli,
+      executionMode: configuredBinding.executionMode
     };
   }
 
@@ -343,21 +405,32 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
   async bindGroupWorkspace(input: {
     chatId: string;
     cli: ChatCli;
+    executionMode: ChatExecutionMode;
     code: string;
   }): Promise<
     | {
         ok: true;
         entry: ChatWorkspaceCatalogEntry;
         cli: ChatCli;
+        executionMode: ChatExecutionMode;
         configFilePath: string;
       }
     | {
         ok: false;
-        reason: "invalid_code" | "catalog_empty" | "config_invalid";
+        reason: "invalid_code" | "catalog_empty" | "config_invalid" | "unsupported_execution_mode";
         detail: string;
         configFilePath: string;
       }
   > {
+    if (input.executionMode === "docker" && input.cli !== "codex") {
+      return {
+        ok: false,
+        reason: "unsupported_execution_mode",
+        detail: "docker 模式当前只支持 codex。claude 和 kimi 仍然只能使用 host 裸金属模式。",
+        configFilePath: this.configFilePath
+      };
+    }
+
     const entries = await this.listCatalog();
     if (entries.length === 0) {
       return {
@@ -401,7 +474,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ...bindingsResult.bindings,
       [input.chatId]: {
         workspace: entry.workspace,
-        cli: input.cli
+        cli: input.cli,
+        executionMode: input.executionMode
       }
     };
 
@@ -418,6 +492,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ok: true,
       entry,
       cli: input.cli,
+      executionMode: input.executionMode,
       configFilePath: this.configFilePath
     };
   }

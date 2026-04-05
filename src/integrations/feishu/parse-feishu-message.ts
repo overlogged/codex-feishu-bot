@@ -95,10 +95,12 @@ function normalizeEventBody(
 ): {
   tenantKey?: string;
   senderId: string;
+  senderName: string;
   senderType: string;
   messageId: string;
   chatId: string;
   chatType: string;
+  chatName?: string;
   content: unknown;
   mentions: Array<UnknownRecord>;
 } | undefined {
@@ -139,6 +141,19 @@ function normalizeEventBody(
     (senderIdContainer &&
       pickString(senderIdContainer, ["open_id", "openId", "union_id", "unionId", "user_id", "userId"])) ??
     "unknown";
+  const senderName =
+    (sender &&
+      pickString(sender, [
+        "sender_name",
+        "senderName",
+        "name",
+        "display_name",
+        "displayName",
+        "user_name",
+        "userName"
+      ])) ??
+    pickString(scope, ["sender_name", "senderName", "name"]) ??
+    senderId;
 
   const content =
     message.content ??
@@ -146,6 +161,27 @@ function normalizeEventBody(
     pickObject(message, ["body"])?.text ??
     message.plain_text ??
     message.text;
+  const chatName =
+    pickString(message, [
+      "chat_name",
+      "chatName",
+      "chat_title",
+      "chatTitle",
+      "conversation_name",
+      "conversationName",
+      "title",
+      "name"
+    ]) ??
+    pickString(scope, [
+      "chat_name",
+      "chatName",
+      "chat_title",
+      "chatTitle",
+      "conversation_name",
+      "conversationName",
+      "title",
+      "name"
+    ]);
   const mentions = pickMentions(message) ?? pickMentions(scope) ?? [];
   const tenantKey =
     pickString(scope, ["tenant_key", "tenantKey"]) ??
@@ -159,10 +195,12 @@ function normalizeEventBody(
   return {
     tenantKey,
     senderId,
+    senderName,
     senderType,
     messageId,
     chatId,
     chatType,
+    chatName,
     content,
     mentions
   };
@@ -190,9 +228,10 @@ export function parseFeishuMessageEventResult(body: unknown): ParseFeishuMessage
     message: {
       chatId: normalized.chatId,
       chatType: normalized.chatType,
+      chatName: normalized.chatName,
       messageId: normalized.messageId,
       senderId: normalized.senderId,
-      senderName: normalized.senderId,
+      senderName: normalized.senderName,
       senderType: normalized.senderType,
       tenantKey: normalized.tenantKey,
       text: extractText(normalized.content),

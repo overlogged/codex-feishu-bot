@@ -1,4 +1,10 @@
-import type { ChatCli, ChatSession, IncomingChatMessage, ScheduledTaskRecord } from "../domain/types.js";
+import type {
+  ChatCli,
+  ChatExecutionMode,
+  ChatSession,
+  IncomingChatMessage,
+  ScheduledTaskRecord
+} from "../domain/types.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
 import type { FeishuMessageClient } from "../integrations/feishu/feishu-message-client.js";
 import { ConversationStore } from "../stores/conversation-store.js";
@@ -65,51 +71,48 @@ function renderCliLabel(cli: ChatCli): string {
   }
 }
 
+function renderExecutionModeLabel(executionMode: ChatExecutionMode): string {
+  return executionMode === "docker" ? "Docker" : "Host";
+}
+
 function extractGroupBindingCommand(
   message: IncomingChatMessage
-): { code: string; cli: ChatCli } | undefined {
+): { code: string; cli: ChatCli; executionMode: ChatExecutionMode } | undefined {
   if (message.chatType !== "group" || !message.mentionsBot) {
     return undefined;
   }
 
   const strippedText = stripMentions(message.text);
   const parts = strippedText.split(/\s+/).filter(Boolean);
-  if (parts.length === 1 && /^\d+$/.test(parts[0] ?? "")) {
+  const code = parts.find((part) => /^\d+$/.test(part));
+  if (!code) {
+    return undefined;
+  }
+
+  const cli = parts
+    .map((part) => part.toLowerCase())
+    .find((part): part is ChatCli => part === "codex" || part === "claude" || part === "kimi");
+  const executionMode = parts
+    .map((part) => part.toLowerCase())
+    .find((part): part is ChatExecutionMode => part === "host" || part === "docker");
+
+  if (parts.length === 1 && code === parts[0]) {
     return {
-      code: parts[0]!,
-      cli: "codex"
+      code,
+      cli: "codex",
+      executionMode: "host"
     };
   }
 
-  if (parts.length !== 2) {
+  if (parts.length > 3) {
     return undefined;
   }
 
-  const [first, second] = parts;
-  const cliFrom = (value: string | undefined): ChatCli | undefined => {
-    if (value === "codex" || value === "claude" || value === "kimi") {
-      return value;
-    }
-    return undefined;
+  return {
+    code,
+    cli: cli ?? "codex",
+    executionMode: executionMode ?? "host"
   };
-
-  const firstCli = cliFrom(first?.toLowerCase());
-  const secondCli = cliFrom(second?.toLowerCase());
-  if (firstCli && /^\d+$/.test(second ?? "")) {
-    return {
-      cli: firstCli,
-      code: second!
-    };
-  }
-
-  if (secondCli && /^\d+$/.test(first ?? "")) {
-    return {
-      cli: secondCli,
-      code: first!
-    };
-  }
-
-  return undefined;
 }
 
 function parseScheduleCommand(message: IncomingChatMessage): ScheduleCommand | undefined {
@@ -129,7 +132,7 @@ function parseScheduleCommand(message: IncomingChatMessage): ScheduleCommand | u
   if (/^(帮助|help)$/i.test(action)) {
     return {
       kind: "help",
-      detail: "请使用“定时任务 添加 <cron> | <任务内容>”、“定时任务 每天 9 点 生成工作日报”或“定时任务 列表”。"
+      detail: "请使用“定时任务 添加 <cron> | <任务内容>”或“定时任务 列表”。"
     };
   }
 
@@ -199,30 +202,30 @@ function parseScheduleCommand(message: IncomingChatMessage): ScheduleCommand | u
 function renderScheduleHelp(): string {
   return [
     "这个群支持这些定时任务命令：",
-    "1. @机器人 定时任务 每天 9 点 生成工作日报",
-    "2. @机器人 暂停第一个定时任务",
-    "3. @机器人 恢复日报那条定时任务",
-    "4. @机器人 删除 2 号定时任务",
-    "5. @机器人 看看这个群的定时任务",
+    "1. @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
+    "2. @机器人 定时任务 暂停 1",
+    "3. @机器人 定时任务 启用 1",
+    "4. @机器人 定时任务 删除 1",
+    "5. @机器人 定时任务",
     "",
-    "控制 agent 会把自然语言转换成 cron。",
-    "如果你更喜欢手写 cron，也可以说：@机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报"
+    "定时任务当前使用显式 cron，不再走单独的群控制线程。"
   ].join("\n");
 }
 
 function renderControlHelp(defaultWorkspace: string): string {
   return [
-    "群里 @机器人 只用于配置控制，不用于普通项目任务。",
-    "如果你要让项目 agent 干活，请直接发普通消息，不要 @机器人。",
+    "群里可以直接发普通消息，也可以 @机器人。",
+    "@机器人 不会再切到单独控制线程；它会继续走这个群当前绑定的会话。",
     "",
-    "常见配置说法：",
-    "1. @机器人 看一下这个群现在绑到哪",
-    "2. @机器人 把这个群绑定到 codex 的 Quant",
-    "3. @机器人 给这个群切到 claude 的 Downloads",
-    "4. @机器人 看看有哪些工作区",
-    "5. @机器人 给这个群新开一个会话",
-    "6. @机器人 定时任务 每天 9 点生成工作日报",
+    "常见命令：",
+    "1. 私聊机器人发送 工作区，先拿目录编号",
+    "2. 群里发 @机器人 12",
+    "3. 群里发 @机器人 claude 12",
+    "4. 群里发 @机器人 docker 12",
+    "5. 群里发 @机器人 新会话",
+    "6. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
     "",
+    "执行模式默认是 host；如果明确说 docker，就会进入受限容器模式。",
     `工作区根目录是 ${defaultWorkspace}，只列一级子目录。`
   ].join("\n");
 }
@@ -247,18 +250,96 @@ function renderWorkspaceCatalogMessage(
       ].join("\n");
 }
 
-function buildThreadReplyMetadata(message: IncomingChatMessage): {
+function buildThreadReplyMetadata(_message: IncomingChatMessage): {
   replyToMessageId?: string;
   replyInThread?: boolean;
 } {
-  if (message.chatType === "group" && message.mentionsBot) {
-    return {
-      replyToMessageId: message.messageId,
-      replyInThread: true
-    };
+  return {};
+}
+
+function summarizeMessagePreview(text: string): string | undefined {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return undefined;
   }
 
-  return {};
+  return normalized.slice(0, 160);
+}
+
+function normalizeExecutionMode(value: ChatExecutionMode | undefined): ChatExecutionMode {
+  return value === "docker" ? "docker" : "host";
+}
+
+function isHumanMessage(message: IncomingChatMessage): boolean {
+  return (
+    message.senderType !== "system" &&
+    message.senderType !== "app" &&
+    message.senderType !== "bot"
+  );
+}
+
+function resolveChatDisplayName(
+  message: IncomingChatMessage,
+  existingSession?: ChatSession
+): string | undefined {
+  const existingDisplayName = existingSession?.chatDisplayName ?? existingSession?.chatName;
+
+  if (message.chatType === "group") {
+    return message.chatName ?? existingDisplayName;
+  }
+
+  if (message.chatType === "p2p") {
+    if (message.chatName) {
+      return message.chatName;
+    }
+
+    if (
+      message.senderType !== "system" &&
+      message.senderType !== "app" &&
+      message.senderType !== "bot" &&
+      message.senderName.trim()
+    ) {
+      return message.senderName;
+    }
+
+    return existingDisplayName;
+  }
+
+  return message.chatName ?? existingDisplayName;
+}
+
+function buildSessionMetadataPatch(
+  message: IncomingChatMessage,
+  existingSession?: ChatSession,
+  observedAt = new Date().toISOString()
+): Pick<
+  ChatSession,
+  | "chatType"
+  | "chatName"
+  | "chatDisplayName"
+  | "lastInboundAt"
+  | "lastSenderId"
+  | "lastSenderName"
+  | "lastMessageId"
+  | "lastMessagePreview"
+  | "lastUserMessagePreview"
+> {
+  const messagePreview = summarizeMessagePreview(message.text);
+  const lastUserMessagePreview = isHumanMessage(message)
+    ? messagePreview ?? existingSession?.lastUserMessagePreview
+    : existingSession?.lastUserMessagePreview;
+
+  return {
+    chatType: message.chatType || existingSession?.chatType,
+    chatName: message.chatName ?? existingSession?.chatName,
+    chatDisplayName: resolveChatDisplayName(message, existingSession),
+    lastInboundAt: observedAt,
+    lastSenderId: message.senderId || existingSession?.lastSenderId,
+    lastSenderName: message.senderName || existingSession?.lastSenderName,
+    lastMessageId: message.messageId || existingSession?.lastMessageId,
+    lastMessagePreview: messagePreview ?? existingSession?.lastMessagePreview,
+    lastUserMessagePreview
+  };
 }
 
 function renderScheduleList(tasks: ScheduledTaskRecord[]): string {
@@ -355,6 +436,8 @@ export class ChatOrchestrator {
   }
 
   private async processIncomingMessage(message: IncomingChatMessage): Promise<void> {
+    this.touchExistingSession(message);
+
     if (await this.handleControlMessage(message)) {
       return;
     }
@@ -391,14 +474,17 @@ export class ChatOrchestrator {
         session: existingSession,
         cli: workspaceResolution.cli,
         workspaceId: workspaceResolution.workspaceId,
+        executionMode: workspaceResolution.executionMode,
         message
       }) &&
       existingSession.workspaceId === workspaceResolution.workspaceId &&
-      existingSession.cli === workspaceResolution.cli
+      existingSession.cli === workspaceResolution.cli &&
+      normalizeExecutionMode(existingSession.executionMode) === workspaceResolution.executionMode
     ) {
       await this.dispatchActiveOrNew(existingSession, message, {
         cli: workspaceResolution.cli,
-        workspaceId: workspaceResolution.workspaceId
+        workspaceId: workspaceResolution.workspaceId,
+        executionMode: workspaceResolution.executionMode
       });
       return;
     }
@@ -411,13 +497,18 @@ export class ChatOrchestrator {
     routing?: {
       workspaceId: string;
       cli: ChatCli;
+      executionMode: ChatExecutionMode;
     }
   ): Promise<void> {
     const existingSession = this.sessionStore.get(message.chatId);
     const resolvedWorkspaceId = routing?.workspaceId ?? existingSession?.workspaceId ?? this.defaultWorkspace;
     const resolvedCli = routing?.cli ?? existingSession?.cli ?? "codex";
+    const resolvedExecutionMode =
+      routing?.executionMode ?? normalizeExecutionMode(existingSession?.executionMode);
     const reusableSession =
-      existingSession?.workspaceId === resolvedWorkspaceId && existingSession.cli === resolvedCli
+      existingSession?.workspaceId === resolvedWorkspaceId &&
+      existingSession.cli === resolvedCli &&
+      normalizeExecutionMode(existingSession.executionMode) === resolvedExecutionMode
         ? existingSession
         : undefined;
     const threadId = reusableSession
@@ -425,18 +516,22 @@ export class ChatOrchestrator {
           session: reusableSession,
           cli: resolvedCli,
           workspaceId: resolvedWorkspaceId,
+          executionMode: resolvedExecutionMode,
           message
         })
       : `pending:${message.chatId}:${Date.now()}`;
+    const observedAt = new Date().toISOString();
 
     this.sessionStore.save({
       chatId: message.chatId,
       threadId,
       cli: resolvedCli,
       workspaceId: resolvedWorkspaceId,
+      executionMode: resolvedExecutionMode,
+      ...buildSessionMetadataPatch(message, reusableSession ?? existingSession, observedAt),
       activeRunId: reusableSession?.activeRunId,
       activeTurnId: reusableSession?.activeTurnId,
-      updatedAt: new Date().toISOString()
+      updatedAt: observedAt
     });
 
     const run = this.runStore.create({
@@ -452,6 +547,7 @@ export class ChatOrchestrator {
         session: this.sessionStore.get(message.chatId),
         cli: resolvedCli,
         workspaceId: resolvedWorkspaceId,
+        executionMode: resolvedExecutionMode,
         message,
         threadId
       })) {
@@ -464,7 +560,8 @@ export class ChatOrchestrator {
         this.sessionStore.updateBoundRun(message.chatId, run.runId, {
           threadId: result.run.threadId,
           cli: resolvedCli,
-          workspaceId: resolvedWorkspaceId
+          workspaceId: resolvedWorkspaceId,
+          executionMode: resolvedExecutionMode
         });
 
         for (const item of result.items) {
@@ -522,6 +619,12 @@ export class ChatOrchestrator {
     }
 
     const workspaceId = messageSession.workspaceId ?? this.defaultWorkspace;
+    const executionMode = normalizeExecutionMode(messageSession.executionMode);
+    this.sessionStore.updateBoundRun(
+      message.chatId,
+      messageSession.activeRunId,
+      buildSessionMetadataPatch(message, messageSession)
+    );
     this.logger.info(
       {
         chatId: message.chatId,
@@ -543,6 +646,7 @@ export class ChatOrchestrator {
         session: messageSession,
         cli: messageSession.cli,
         workspaceId,
+        executionMode,
         message,
         threadId: messageSession.threadId,
         turnId: messageSession.activeTurnId
@@ -572,6 +676,7 @@ export class ChatOrchestrator {
     routing: {
       workspaceId: string;
       cli: ChatCli;
+      executionMode: ChatExecutionMode;
     }
   ): Promise<void> {
     let session = initialSession;
@@ -632,14 +737,17 @@ export class ChatOrchestrator {
         session: existingSession,
         cli: workspaceResolution.cli,
         workspaceId: workspaceResolution.workspaceId,
+        executionMode: workspaceResolution.executionMode,
         message
       }) &&
       existingSession.workspaceId === workspaceResolution.workspaceId &&
-      existingSession.cli === workspaceResolution.cli
+      existingSession.cli === workspaceResolution.cli &&
+      normalizeExecutionMode(existingSession.executionMode) === workspaceResolution.executionMode
     ) {
       await this.dispatchActiveOrNew(existingSession, message, {
         cli: workspaceResolution.cli,
-        workspaceId: workspaceResolution.workspaceId
+        workspaceId: workspaceResolution.workspaceId,
+        executionMode: workspaceResolution.executionMode
       });
       return {
         outcome: "triggered"
@@ -653,11 +761,6 @@ export class ChatOrchestrator {
   }
 
   private async handleControlMessage(message: IncomingChatMessage): Promise<boolean> {
-    if (message.chatType === "group" && message.mentionsBot) {
-      await this.handleGroupMentionControlMessage(message);
-      return true;
-    }
-
     if (message.chatType === "p2p" && isWorkspaceCatalogCommand(message.text)) {
       const entries = await this.workspaceResolver.listCatalog();
       const content = renderWorkspaceCatalogMessage(entries, this.defaultWorkspace);
@@ -687,6 +790,7 @@ export class ChatOrchestrator {
     const result = await this.workspaceResolver.bindGroupWorkspace({
       chatId: message.chatId,
       cli: bindingCommand.cli,
+      executionMode: bindingCommand.executionMode,
       code: bindingCommand.code
     });
     if (!result.ok) {
@@ -700,8 +804,8 @@ export class ChatOrchestrator {
     await this.sendTextNotice(
       message.chatId,
       [
-        `已将这个群绑定到 ${renderCliLabel(result.cli)} CLI 的工作区 ${result.entry.code}: ${result.entry.workspace}`,
-        `后续这个群里的任务都会通过 ${result.cli} 从 ${result.entry.workspaceId} 启动。`
+        `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}`,
+        `后续这个群里的任务都会通过 ${result.executionMode} / ${result.cli} 从 ${result.entry.workspaceId} 启动。`
       ].join("\n"),
       {
         messageId: message.messageId,
@@ -729,6 +833,7 @@ export class ChatOrchestrator {
           ? {
               configured: true,
               cli: currentBindingResolution.cli,
+              executionMode: currentBindingResolution.executionMode,
               workspaceId: currentBindingResolution.workspaceId
             }
           : {
@@ -772,6 +877,7 @@ export class ChatOrchestrator {
             ? [
                 "这个群当前已经绑定工作区。",
                 `CLI：${currentBindingResolution.cli}`,
+                `模式：${currentBindingResolution.executionMode}`,
                 `工作区：${currentBindingResolution.workspaceId}`
               ].join("\n")
             : currentBindingResolution.detail,
@@ -786,15 +892,16 @@ export class ChatOrchestrator {
         const result = await this.workspaceResolver.bindGroupWorkspace({
           chatId: message.chatId,
           cli: intent.cli,
+          executionMode: intent.executionMode,
           code: intent.code
         });
         await this.sendTextNotice(
           message.chatId,
           result.ok
             ? [
-                `已将这个群绑定到 ${renderCliLabel(result.cli)} CLI 的工作区 ${result.entry.code}: ${result.entry.workspace}`,
-                `后续普通群消息会通过 ${result.cli} 从 ${result.entry.workspaceId} 启动。`,
-                "群里 @机器人的消息会继续走配置控制线程。"
+                `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}`,
+                `后续普通群消息会通过 ${result.executionMode} / ${result.cli} 从 ${result.entry.workspaceId} 启动。`,
+                "群里 @机器人的普通消息也会继续走这个群当前绑定的会话。"
               ].join("\n")
             : [result.detail, "", renderWorkspaceCatalogMessage(catalog, this.defaultWorkspace)].join("\n"),
           {
@@ -924,6 +1031,7 @@ export class ChatOrchestrator {
           `cron：${result.task.cron}`,
           `下次触发：${formatScheduleTime(result.task.nextRunAt)}`,
           `CLI：${routing.cli}`,
+          `模式：${routing.executionMode}`,
           `工作区：${routing.workspaceId}`,
           `任务内容：${result.task.prompt}`
         ].join("\n")
@@ -973,6 +1081,7 @@ export class ChatOrchestrator {
           `已启用这个群的定时任务 ${result.task.taskId}。`,
           `下次触发：${formatScheduleTime(result.task.nextRunAt)}`,
           `CLI：${routing.cli}`,
+          `模式：${routing.executionMode}`,
           `工作区：${routing.workspaceId}`
         ].join("\n")
       : result.detail;
@@ -1026,6 +1135,7 @@ export class ChatOrchestrator {
     const threadId = await this.codexWorker.ensureThread({
       cli: workspaceResolution.cli,
       workspaceId: workspaceResolution.workspaceId,
+      executionMode: workspaceResolution.executionMode,
       message
     });
     this.sessionStore.save({
@@ -1033,6 +1143,8 @@ export class ChatOrchestrator {
       threadId,
       cli: workspaceResolution.cli,
       workspaceId: workspaceResolution.workspaceId,
+      executionMode: workspaceResolution.executionMode,
+      ...buildSessionMetadataPatch(message, existingSession),
       activeRunId: undefined,
       activeTurnId: undefined,
       updatedAt: new Date().toISOString()
@@ -1043,6 +1155,7 @@ export class ChatOrchestrator {
       [
         interruptedActiveRun ? "已结束这个群当前的活跃任务，并创建新的会话。" : "已为这个群创建新的会话。",
         `CLI：${workspaceResolution.cli}`,
+        `模式：${workspaceResolution.executionMode}`,
         threadId.startsWith("pending:")
           ? "新 thread 会在下一条消息真正创建。"
           : `新 thread：${threadId}`,
@@ -1105,6 +1218,7 @@ export class ChatOrchestrator {
         session: latestSession,
         cli: latestSession.cli,
         workspaceId: latestSession.workspaceId,
+        executionMode: normalizeExecutionMode(latestSession.executionMode),
         message,
         threadId: latestSession.threadId,
         turnId
@@ -1151,6 +1265,7 @@ export class ChatOrchestrator {
     | {
         workspaceId: string;
         cli: ChatCli;
+        executionMode: ChatExecutionMode;
       }
     | undefined
   > {
@@ -1161,7 +1276,8 @@ export class ChatOrchestrator {
     if (workspaceResolution.ok) {
       return {
         workspaceId: workspaceResolution.workspaceId,
-        cli: workspaceResolution.cli
+        cli: workspaceResolution.cli,
+        executionMode: workspaceResolution.executionMode
       };
     }
 
@@ -1173,10 +1289,33 @@ export class ChatOrchestrator {
     return undefined;
   }
 
+  private touchExistingSession(message: IncomingChatMessage): void {
+    const existingSession = this.sessionStore.get(message.chatId);
+    if (!existingSession) {
+      return;
+    }
+
+    if (existingSession.activeRunId) {
+      this.sessionStore.updateBoundRun(
+        message.chatId,
+        existingSession.activeRunId,
+        buildSessionMetadataPatch(message, existingSession)
+      );
+      return;
+    }
+
+    this.sessionStore.save({
+      ...existingSession,
+      ...buildSessionMetadataPatch(message, existingSession),
+      updatedAt: new Date().toISOString()
+    });
+  }
+
   private canSteer(context: {
     session?: ChatSession;
     cli: ChatCli;
     workspaceId: string;
+    executionMode: ChatExecutionMode;
     message: IncomingChatMessage;
   }): boolean {
     return (
@@ -1184,6 +1323,7 @@ export class ChatOrchestrator {
         session: context.session,
         cli: context.cli,
         workspaceId: context.workspaceId,
+        executionMode: context.executionMode,
         message: context.message
       }) ?? Boolean(this.codexWorker.steerTurn)
     );

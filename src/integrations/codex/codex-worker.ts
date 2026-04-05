@@ -1,9 +1,16 @@
-import type { ChatCli, ChatSession, CodexEvent, IncomingChatMessage } from "../../domain/types.js";
+import type {
+  ChatCli,
+  ChatExecutionMode,
+  ChatSession,
+  CodexEvent,
+  IncomingChatMessage
+} from "../../domain/types.js";
 
 export interface CodexTurnContext {
   session?: ChatSession;
   cli: ChatCli;
   workspaceId: string;
+  executionMode?: ChatExecutionMode;
   message: IncomingChatMessage;
 }
 

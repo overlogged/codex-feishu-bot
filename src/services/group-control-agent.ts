@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { ChatCli, CodexEvent, IncomingChatMessage, ScheduledTaskRecord } from "../domain/types.js";
+import type {
+  ChatCli,
+  ChatExecutionMode,
+  CodexEvent,
+  IncomingChatMessage,
+  ScheduledTaskRecord
+} from "../domain/types.js";
 import type { ChatWorkspaceCatalogEntry } from "./chat-workspace-resolver.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
 
@@ -24,6 +30,7 @@ export type GroupControlIntent =
   | {
       kind: "bind_workspace";
       cli: ChatCli;
+      executionMode: ChatExecutionMode;
       code: string;
     }
   | {
@@ -49,6 +56,7 @@ export interface GroupControlContext {
     | {
         configured: true;
         cli: ChatCli;
+        executionMode: ChatExecutionMode;
         workspaceId: string;
       }
     | {
@@ -111,6 +119,15 @@ function normalizeCli(value: string): ChatCli {
   throw new Error(`控制 agent 返回了不支持的 CLI：${value}`);
 }
 
+function normalizeExecutionMode(value: string): ChatExecutionMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "host" || normalized === "docker") {
+    return normalized;
+  }
+
+  throw new Error(`控制 agent 返回了不支持的执行模式：${value}`);
+}
+
 function parseIntent(raw: string): GroupControlIntent {
   const parsed = parseJsonObject(raw);
   const kind = requireString(parsed, "kind");
@@ -127,6 +144,9 @@ function parseIntent(raw: string): GroupControlIntent {
       return {
         kind,
         cli: normalizeCli(requireString(parsed, "cli")),
+        executionMode: normalizeExecutionMode(
+          typeof parsed.executionMode === "string" ? parsed.executionMode : "host"
+        ),
         code: requireString(parsed, "code")
       };
     case "create_schedule":
@@ -176,7 +196,7 @@ function renderScheduledTasks(tasks: ScheduledTaskRecord[]): string {
 function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupControlContext): string {
   const strippedMessage = stripMentions(message.text);
   const currentBinding = context.currentBinding.configured
-    ? `已绑定，cli=${context.currentBinding.cli}，workspace=${context.currentBinding.workspaceId}`
+    ? `已绑定，cli=${context.currentBinding.cli}，executionMode=${context.currentBinding.executionMode}，workspace=${context.currentBinding.workspaceId}`
     : `未绑定。${context.currentBinding.detail}`;
 
   return [
@@ -191,7 +211,7 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "可返回的 kind：",
     '- {"kind":"list_workspaces"}',
     '- {"kind":"show_binding"}',
-    '- {"kind":"bind_workspace","cli":"codex|claude|kimi","code":"<目录编号>"}',
+    '- {"kind":"bind_workspace","cli":"codex|claude|kimi","executionMode":"host|docker","code":"<目录编号>"}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
     '- {"kind":"pause_schedule","taskId":"<编号>"}',
@@ -205,6 +225,9 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "- 可以把自然语言时间转成 cron，例如“工作日早上 9 点” -> 0 9 * * 1-5。",
     "- 可以根据当前定时任务列表把“第一个/日报那条”解析成 taskId。",
     "- 绑定工作区时，必须从下面给出的目录编号里选 code。",
+    "- 如果用户没有明确提模式，executionMode 默认返回 host。",
+    "- 如果用户明确说“docker 模式 / 容器模式”，executionMode 返回 docker。",
+    "- docker 模式当前只支持 codex；如果用户说 claude/kimi + docker，返回 help 解释限制。",
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",
     "- 如果用户说“新会话”“重开会话”，返回 new_session。",
@@ -258,6 +281,7 @@ export class CodexGroupControlAgent implements GroupControlAgent {
 
     for await (const event of this.codexWorker.runTurn({
       cli: "codex",
+      executionMode: "host",
       workspaceId: this.defaultWorkspace,
       message: internalMessage,
       threadId

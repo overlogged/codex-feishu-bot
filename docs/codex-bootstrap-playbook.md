@@ -46,7 +46,7 @@ agent-browser install
 13. Keep `DEFAULT_WORKSPACE` pointed at `/home/overlogged` unless the user explicitly wants another host root.
 14. Keep `CODEX_ARTIFACTS_DIR` pointed at the default artifact directory unless the user explicitly wants another export location.
 15. Group chats must not run until they are bound to a subdirectory under `DEFAULT_WORKSPACE`.
-16. The group binding flow is: private-chat the bot with `工作区`, then `@bot <编号>` inside the target group.
+16. The group binding flow is: private-chat the bot with `工作区`, then bind inside the target group with `@bot <编号>`, `@bot docker <编号>`, or equivalent natural language. If mode is omitted, default to `host`.
 
 ## Runtime Setup
 

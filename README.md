@@ -54,7 +54,7 @@
 把这段 prompt 直接贴给 Codex：
 
 ```text
-打开这个仓库后，严格按照 README.md、AGENTS.md、docs/codex-bootstrap-playbook.md、docs/feishu-console-automation.md 执行，不要把普通的控制台配置步骤推回给我。先运行 pnpm install、pnpm bootstrap:env、pnpm chrome:debug。然后先明确问我一个问题：是否要创建新的机器人。如果我回答“要”，就异步执行 `npx -y lark-op-cli@latest create-bot --name "Codex 机器人"` 并持续读取输出；如果过程中出现扫码登录，请把 ASCII 二维码原样转发给我。如果我回答“不要”，再确认我是否已经登录飞书开放平台或 OpenAI/Codex；如果我没登录，再停下来让我登录。登录完成后，就继续走原来的浏览器和 agent-browser / Chrome CDP 方案，只选择已有机器人并完成后续配置，不要再创建新的机器人。拿到 FEISHU_APP_ID 和 FEISHU_APP_SECRET 后写回 .env.real，然后在宿主机运行 `pnpm codex:host`、`pnpm build`、`pnpm start`，再用 `pnpm host:smoke` 验证服务，最后告诉我怎么在飞书里测试。群聊工作区绑定必须通过私聊机器人发送“工作区”获取编号，再回群里 `@机器人 编号` 完成。
+打开这个仓库后，严格按照 README.md、AGENTS.md、docs/codex-bootstrap-playbook.md、docs/feishu-console-automation.md 执行，不要把普通的控制台配置步骤推回给我。先运行 pnpm install、pnpm bootstrap:env、pnpm chrome:debug。然后先明确问我一个问题：是否要创建新的机器人。如果我回答“要”，就异步执行 `npx -y lark-op-cli@latest create-bot --name "Codex 机器人"` 并持续读取输出；如果过程中出现扫码登录，请把 ASCII 二维码原样转发给我。如果我回答“不要”，再确认我是否已经登录飞书开放平台或 OpenAI/Codex；如果我没登录，再停下来让我登录。登录完成后，就继续走原来的浏览器和 agent-browser / Chrome CDP 方案，只选择已有机器人并完成后续配置，不要再创建新的机器人。拿到 FEISHU_APP_ID 和 FEISHU_APP_SECRET 后写回 .env.real，然后在宿主机运行 `pnpm codex:host`、`pnpm build:host`、`pnpm start`，再用 `pnpm host:smoke` 验证服务，最后告诉我怎么在飞书里测试。群聊工作区绑定必须通过私聊机器人发送“工作区”获取编号，再回群里 `@机器人 编号`、`@机器人 docker 编号`，或用自然语言完成绑定。
 ```
 
 同样的 prompt 也单独放在 [docs/codex-bootstrap-prompt.md](docs/codex-bootstrap-prompt.md)。
@@ -122,7 +122,36 @@ pnpm start
 pnpm host:smoke
 ```
 
-默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的子目录，不能直接把仓库根目录当运行工作区。
+默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的一级子目录，不能直接把仓库根目录当运行工作区。
+
+## 按群执行模式
+
+每个群的绑定现在同时决定三件事：
+
+- 目录编号
+- CLI 类型
+- 执行模式
+
+默认是 `host` 模式，也就是裸机直接运行。群里如果没特别指定，就按 `host` 处理。
+
+如果群绑定成 `docker` 模式：
+
+- 当前只支持 `codex`
+- 实际执行仍然走同一套 `codex app-server` 协议
+- 使用仓库当前的运行镜像 `codex-feishu-bot-session:local`
+- 运行镜像默认基于 Ubuntu 24.04，并对齐宿主机的 Node 24.14.0 / Codex CLI 0.118.0，优先解决宿主机编译产物在容器里的 glibc 兼容问题
+- 把宿主机 `/home` 原样映射进容器里的 `/home`
+- CPU 限制为本机可用核心数的一半
+- 内存限制为 `100g`
+- 这个群的 session 仍然由宿主机上的 `app` 进程统一编排，所以 `agent-manager`、`/debug/state` 和 `codex-feishu-agent list` 都能看到它
+
+常见绑定方式：
+
+- 私聊机器人发 `工作区`
+- 回到群里发 `@机器人 12`
+- 或 `@机器人 claude 12`
+- 或 `@机器人 docker 12`
+- 或自然语言，例如 `@机器人 把这个群切到 docker 模式的 12 号目录`
 
 ## 后台运行
 
@@ -185,6 +214,11 @@ pnpm bootstrap:env
 - `CHAT_WORKSPACE_BINDINGS_FILE`
 - `CODEX_ARTIFACTS_DIR`
 - `RUNTIME_STATE_FILE`
+- `DOCKER_EXECUTION_IMAGE`
+- `DOCKER_EXECUTION_CONTAINER_NAME`
+- `DOCKER_EXECUTION_LISTEN_URL`
+- `DOCKER_EXECUTION_MEMORY`
+- `DOCKER_EXECUTION_MOUNT_ROOT`
 
 推荐优先让 Codex 检查宿主机是否已经存在 `~/.codex/auth.json`。如果存在，就把 `CODEX_HOME_SOURCE` 改成这个宿主机绝对路径；只有在本机没有 Codex 登录态时，才退回 `OPENAI_API_KEY`。
 
@@ -208,13 +242,14 @@ Codex 在飞书开放平台里最终应达到这个状态：
 服务起来后：
 
 ```bash
-pnpm docker:smoke
+pnpm host:smoke
 ```
 
 再去飞书里：
 
 - 把机器人拉进一个群
-- 群里直接发消息即可，不需要 `@`
+- 先用私聊 `工作区` 获取编号，再在群里通过 `@机器人` 完成绑定
+- 绑定后群里直接发普通消息即可，不需要每条都 `@`
 - 或直接单聊机器人
 
 如果自动化配置和部署都完成，机器人应能直接回消息、更新过程卡片、发送文件。

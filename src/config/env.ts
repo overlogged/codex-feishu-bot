@@ -62,6 +62,11 @@ const envSchema = z.object({
   FEISHU_BRIDGE_SCRIPT: z.string().default("scripts/feishu-bridge.mjs"),
   CLAUDE_CLI_COMMAND: z.string().default("cl"),
   KIMI_CLI_COMMAND: z.string().default("kimi"),
+  DOCKER_EXECUTION_IMAGE: z.string().default("codex-feishu-bot-session:local"),
+  DOCKER_EXECUTION_CONTAINER_NAME: z.string().default("codex-feishu-bot-session-pool"),
+  DOCKER_EXECUTION_LISTEN_URL: z.string().url().default("ws://127.0.0.1:4510"),
+  DOCKER_EXECUTION_MEMORY: z.string().default("100g"),
+  DOCKER_EXECUTION_MOUNT_ROOT: z.string().default("/home"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
   FEISHU_PROVIDER: z.enum(["sdk", "fake"]).default("sdk"),
   FEISHU_TRANSPORT: z.enum(["websocket", "webhook", "disabled"]).default("websocket"),
@@ -89,6 +94,7 @@ export function readEnv(): Env {
     CHAT_WORKSPACE_BINDINGS_FILE: resolveDir(defaultWorkspace, parsed.CHAT_WORKSPACE_BINDINGS_FILE),
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
     RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE),
-    FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT)
+    FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT),
+    DOCKER_EXECUTION_MOUNT_ROOT: resolveDir(process.cwd(), parsed.DOCKER_EXECUTION_MOUNT_ROOT)
   };
 }

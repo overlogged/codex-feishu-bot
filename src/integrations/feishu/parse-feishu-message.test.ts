@@ -102,12 +102,14 @@ test("parseFeishuMessageEventResult supports webhook envelope payload", () => {
       sender: {
         sender_id: {
           open_id: "ou_sender_2"
-        }
+        },
+        sender_name: "张三"
       },
       message: {
         message_id: "om_2",
         chat_id: "oc_2",
         chat_type: "group",
+        chat_name: "产品讨论群",
         content: "{\"text\":\"@codex 帮我看一下\"}",
         mentions: [
           {
@@ -127,8 +129,10 @@ test("parseFeishuMessageEventResult supports webhook envelope payload", () => {
 
   assert.equal(result.message.chatId, "oc_2");
   assert.equal(result.message.chatType, "group");
+  assert.equal(result.message.chatName, "产品讨论群");
   assert.equal(result.message.messageId, "om_2");
   assert.equal(result.message.senderId, "ou_sender_2");
+  assert.equal(result.message.senderName, "张三");
   assert.equal(result.message.senderType, "unknown");
   assert.equal(result.message.tenantKey, "tenant_2");
   assert.equal(result.message.text, "@codex 帮我看一下");
