@@ -110,8 +110,11 @@ test("splitAssistantCardBodies splits final answers with many markdown tables", 
   );
 
   assert.equal(bodies.length, 2);
-  assert.match(bodies[0] ?? "", /第 1\/2 部分/);
-  assert.match(bodies[1] ?? "", /第 2\/2 部分/);
+  assert.ok(bodies.every((body) => !body.includes("第 1/2 部分") && !body.includes("第 2/2 部分")));
+  assert.match(bodies[0] ?? "", /总览/);
+  assert.match(bodies[0] ?? "", /\| C \| D \|/);
+  assert.match(bodies[1] ?? "", /\| E \| F \|/);
+  assert.match(bodies[1] ?? "", /说明三/);
 });
 
 test("renderToolCardContent emits markdown blocks for tool progress", () => {

@@ -5,7 +5,7 @@ import type { Readable } from "node:stream";
 import type { CodexEvent } from "../../domain/types.js";
 import type { Env } from "../../config/env.js";
 import { buildCliTurnInput } from "./cli-turn-input.js";
-import type { CodexTurnContext, CodexWorker } from "./codex-worker.js";
+import type { CodexInterruptContext, CodexTurnContext, CodexWorker } from "./codex-worker.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -91,6 +91,7 @@ export class ClaudeCliWorker implements CodexWorker {
     {
       child: ChildProcessByStdio<null, Readable, Readable>;
       interrupted: boolean;
+      interruptionMessage?: string;
     }
   >();
 
@@ -107,13 +108,14 @@ export class ClaudeCliWorker implements CodexWorker {
     return context.session?.threadId ?? randomUUID();
   }
 
-  async interruptTurn(context: CodexTurnContext & { threadId: string; turnId: string }): Promise<void> {
+  async interruptTurn(context: CodexInterruptContext): Promise<void> {
     const activeTurn = this.activeTurns.get(context.turnId);
     if (!activeTurn) {
       return;
     }
 
     activeTurn.interrupted = true;
+    activeTurn.interruptionMessage = context.interruptionMessage ?? "当前任务已被中断。";
     if (!activeTurn.child.killed) {
       activeTurn.child.kill("SIGTERM");
       setTimeout(() => {
@@ -171,6 +173,7 @@ export class ClaudeCliWorker implements CodexWorker {
       | {
           child: ChildProcessByStdio<null, Readable, Readable>;
           interrupted: boolean;
+          interruptionMessage?: string;
         }
       | undefined;
     const result = await new Promise<{
@@ -189,7 +192,8 @@ export class ClaudeCliWorker implements CodexWorker {
       );
       const activeTurnRecord = {
         child,
-        interrupted: false
+        interrupted: false,
+        interruptionMessage: undefined
       };
       activeTurn = activeTurnRecord;
       this.activeTurns.set(turnId, activeTurnRecord);
@@ -224,7 +228,7 @@ export class ClaudeCliWorker implements CodexWorker {
     if (activeTurn?.interrupted) {
       yield {
         kind: "error",
-        message: "当前任务已被“新会话”中断。"
+        message: activeTurn.interruptionMessage ?? "当前任务已被中断。"
       };
       return;
     }

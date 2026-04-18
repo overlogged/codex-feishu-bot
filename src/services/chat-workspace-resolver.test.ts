@@ -261,7 +261,40 @@ test("FileBackedChatWorkspaceResolver supports docker mode for codex bindings", 
   });
 });
 
-test("FileBackedChatWorkspaceResolver rejects docker mode for non-codex CLIs", async () => {
+test("FileBackedChatWorkspaceResolver supports docker mode for kimi bindings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const actualWorkspace = join(workspaceRoot, "Quant");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(actualWorkspace, { recursive: true });
+  await mkdir(join(workspaceRoot, ".codex-feishu-bot"), { recursive: true });
+  await writeFile(
+    configFilePath,
+    JSON.stringify({
+      oc_group_1: {
+        workspace: "Quant",
+        cli: "kimi",
+        executionMode: "docker"
+      }
+    }),
+    "utf8"
+  );
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.resolve({
+    message: createMessage()
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    workspaceId: actualWorkspace,
+    cli: "kimi",
+    executionMode: "docker"
+  });
+});
+
+test("FileBackedChatWorkspaceResolver rejects docker mode for claude", async () => {
   const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
   const workspaceRoot = join(root, "workspace");
   const actualWorkspace = join(workspaceRoot, "Quant");
@@ -290,5 +323,5 @@ test("FileBackedChatWorkspaceResolver rejects docker mode for non-codex CLIs", a
   if (result.ok) {
     throw new Error("expected unsupported docker binding to fail");
   }
-  assert.match(result.detail, /docker 模式暂时只支持 codex/);
+  assert.match(result.detail, /docker 模式暂时只支持 codex \/ kimi/);
 });

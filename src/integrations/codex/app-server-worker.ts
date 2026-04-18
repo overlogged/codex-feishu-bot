@@ -4,7 +4,7 @@ import type { Env } from "../../config/env.js";
 import type { CodexEvent } from "../../domain/types.js";
 import { AsyncEventQueue } from "./async-event-queue.js";
 import { AppServerWsConnection } from "./app-server-ws-connection.js";
-import type { CodexTurnContext, CodexWorker } from "./codex-worker.js";
+import type { CodexInterruptContext, CodexTurnContext, CodexWorker } from "./codex-worker.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -411,9 +411,7 @@ export class CodexAppServerWorker implements CodexWorker {
     }
   }
 
-  async interruptTurn(
-    context: CodexTurnContext & { threadId: string; turnId: string }
-  ): Promise<void> {
+  async interruptTurn(context: CodexInterruptContext): Promise<void> {
     await this.start();
 
     const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {

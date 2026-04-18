@@ -49,6 +49,13 @@ interface CreateScheduledTaskInput {
   createdByName?: string;
 }
 
+interface UpdateScheduledTaskInput {
+  chatId: string;
+  taskId: string;
+  cron?: string;
+  prompt?: string;
+}
+
 type UpdateScheduledTaskResult =
   | {
       ok: true;
@@ -325,6 +332,65 @@ export class ChatScheduleService {
     return {
       ok: true,
       task
+    };
+  }
+
+  updateTask(input: UpdateScheduledTaskInput): UpdateScheduledTaskResult {
+    const task = this.store.get(input.chatId, input.taskId);
+    if (!task) {
+      return {
+        ok: false,
+        detail: `这个群里没有编号 ${input.taskId} 的定时任务。`
+      };
+    }
+
+    const nextPrompt =
+      input.prompt === undefined
+        ? task.prompt
+        : input.prompt.trim();
+    if (!nextPrompt) {
+      return {
+        ok: false,
+        detail: "定时任务内容不能为空。"
+      };
+    }
+
+    let nextCron = task.cron;
+    if (input.cron !== undefined) {
+      try {
+        nextCron = parseCronExpression(input.cron).normalized;
+      } catch (error) {
+        return {
+          ok: false,
+          detail: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+
+    let nextRunAt: string | undefined;
+    if (task.status === "enabled") {
+      const occurrence = getNextCronOccurrence(nextCron, this.now());
+      if (!occurrence) {
+        return {
+          ok: false,
+          detail: "这个 cron 表达式在未来几年内都不会触发，请检查日期范围。"
+        };
+      }
+      nextRunAt = occurrence.toISOString();
+    }
+
+    const nextTask: ScheduledTaskRecord = {
+      ...task,
+      cron: nextCron,
+      prompt: nextPrompt,
+      updatedAt: this.now().toISOString(),
+      nextRunAt,
+      lastError: task.status === "enabled" ? undefined : task.lastError
+    };
+    this.store.save(nextTask);
+    return {
+      ok: true,
+      task: nextTask
     };
   }
 

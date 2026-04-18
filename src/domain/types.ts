@@ -23,6 +23,8 @@ export interface ChatSession {
   cli: ChatCli;
   workspaceId: string;
   executionMode?: ChatExecutionMode;
+  controlThreadId?: string;
+  controlReplyToMessageId?: string;
   chatType?: string;
   chatName?: string;
   chatDisplayName?: string;

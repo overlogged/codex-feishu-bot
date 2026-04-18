@@ -107,7 +107,9 @@ export class ConversationDeliveryService {
   }
 
   private async deliverTextItem(item: ConversationItem): Promise<void> {
-    if (item.phase !== "completed" && item.phase !== "failed") {
+    const deliverStreamingCommentary = item.source === "commentary" && item.phase === "streaming";
+    const deliverTerminalAssistantText = item.phase === "completed" || item.phase === "failed";
+    if (!deliverStreamingCommentary && !deliverTerminalAssistantText) {
       return;
     }
 

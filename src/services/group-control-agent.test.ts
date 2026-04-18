@@ -21,21 +21,20 @@ function createMessage(overrides: Partial<IncomingChatMessage> = {}): IncomingCh
 }
 
 test("CodexGroupControlAgent interprets structured bind results from a fresh codex turn", async () => {
-  let ensureThreadCalls = 0;
   let runTurnCalls = 0;
   let lastPrompt = "";
   const worker: CodexWorker = {
-    async ensureThread(context) {
-      ensureThreadCalls += 1;
-      assert.equal(context.cli, "codex");
-      assert.equal(context.workspaceId, "/home/overlogged");
-      assert.equal(context.session, undefined);
-      return "thread_control_1";
+    async ensureThread() {
+      return "thread_should_not_be_used";
     },
     async *runTurn(context): AsyncGenerator<CodexEvent> {
       runTurnCalls += 1;
       lastPrompt = context.message.text;
       assert.match(context.threadId, /^pending:group-control:oc_group_1:/);
+      yield {
+        kind: "thread_bound",
+        threadId: "thread_control_1"
+      };
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
@@ -45,7 +44,7 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
   };
 
   const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
-  const intent = await agent.interpret(createMessage(), {
+  const result = await agent.interpret(createMessage(), {
     catalog: [
       {
         code: "1",
@@ -65,16 +64,162 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
     }
   });
 
-  assert.deepEqual(intent, {
-    kind: "bind_workspace",
-    cli: "claude",
-    executionMode: "host",
-    code: "2"
+  assert.deepEqual(result, {
+    intents: [
+      {
+        kind: "bind_workspace",
+        cli: "claude",
+        executionMode: "host",
+        code: "2"
+      }
+    ],
+    threadId: "thread_control_1"
   });
-  assert.equal(ensureThreadCalls, 0);
   assert.equal(runTurnCalls, 1);
-  assert.match(lastPrompt, /只返回一个 JSON 对象/);
+  assert.match(lastPrompt, /多动作时返回/);
   assert.match(lastPrompt, /2: Quant/);
+});
+
+test("CodexGroupControlAgent reuses the existing control thread when provided", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      assert.equal(context.threadId, "thread_control_existing");
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"show_binding"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 看看这个群现在绑到哪"
+    }),
+    {
+      catalog: [],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "未绑定"
+      }
+    },
+    {
+      controlThreadId: "thread_control_existing"
+    }
+  );
+
+  assert.deepEqual(result, {
+    intents: [
+      {
+        kind: "show_binding"
+      }
+    ],
+    threadId: "thread_control_existing"
+  });
+});
+
+test("CodexGroupControlAgent falls back to a fresh control thread when the reused one has no rollout", async () => {
+  const seenThreadIds: string[] = [];
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      seenThreadIds.push(context.threadId);
+      if (seenThreadIds.length === 1) {
+        throw new Error(`no rollout found for thread id ${context.threadId}`);
+      }
+
+      assert.match(context.threadId, /^pending:group-control:oc_group_1:/);
+      yield {
+        kind: "thread_bound",
+        threadId: "thread_control_recovered"
+      };
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"show_binding"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 看看这个群现在绑到哪"
+    }),
+    {
+      catalog: [],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "未绑定"
+      }
+    },
+    {
+      controlThreadId: "thread_control_existing"
+    }
+  );
+
+  assert.equal(seenThreadIds[0], "thread_control_existing");
+  assert.match(seenThreadIds[1] ?? "", /^pending:group-control:oc_group_1:/);
+  assert.deepEqual(result, {
+    intents: [
+      {
+        kind: "show_binding"
+      }
+    ],
+    threadId: "thread_control_recovered"
+  });
+});
+
+test("CodexGroupControlAgent parses multiple actions from an actions array", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"actions":[{"kind":"pause_schedule","taskId":"1"},{"kind":"update_schedule","taskId":"2","cron":"0 9 * * 1-5","prompt":"生成工作日报"}]}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 暂停第一个定时任务，再把第二个改成工作日 9 点生成工作日报"
+    }),
+    {
+      catalog: [],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "未绑定"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "pause_schedule",
+      taskId: "1"
+    },
+    {
+      kind: "update_schedule",
+      taskId: "2",
+      cron: "0 9 * * 1-5",
+      prompt: "生成工作日报"
+    }
+  ]);
+  assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
 });
 
 test("CodexGroupControlAgent rejects missing final answers", async () => {

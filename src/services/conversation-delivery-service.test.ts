@@ -25,7 +25,7 @@ function createItem(overrides: Partial<ConversationItem> = {}): ConversationItem
   };
 }
 
-test("ConversationDeliveryService only delivers completed assistant summaries", async () => {
+test("ConversationDeliveryService streams commentary to Feishu before completion", async () => {
   const calls: string[] = [];
   const conversationStore = new ConversationStore();
   const service = new ConversationDeliveryService(
@@ -58,8 +58,67 @@ test("ConversationDeliveryService only delivers completed assistant summaries", 
   await service.flush("run_1", "msg_1");
 
   conversationStore.update("run_1", "msg_1", {
+    phase: "streaming",
+    content: "处理中：先读取配置"
+  });
+  await service.flush("run_1", "msg_1");
+
+  conversationStore.update("run_1", "msg_1", {
+    phase: "streaming",
+    content: "处理中：先读取配置，再检查实验目录"
+  });
+  await service.flush("run_1", "msg_1");
+
+  conversationStore.update("run_1", "msg_1", {
     phase: "completed",
     content: "阶段总结：已完成准备工作"
+  });
+  await service.flush("run_1", "msg_1");
+
+  assert.deepEqual(calls, ["sendCard", "updateCard", "updateCard", "updateCard"]);
+});
+
+test("ConversationDeliveryService still waits for final answers to complete before sending", async () => {
+  const calls: string[] = [];
+  const conversationStore = new ConversationStore();
+  const service = new ConversationDeliveryService(
+    {
+      sendText: async () => {
+        calls.push("sendText");
+        return "om_text_1";
+      },
+      updateText: async () => {
+        calls.push("updateText");
+      },
+      sendCard: async () => {
+        calls.push("sendCard");
+        return "om_card_1";
+      },
+      updateCard: async () => {
+        calls.push("updateCard");
+      },
+      sendFile: async () => {
+        calls.push("sendFile");
+        return "om_file_1";
+      }
+    },
+    conversationStore,
+    1,
+    console
+  );
+
+  conversationStore.save(
+    createItem({
+      source: "final_answer",
+      phase: "streaming",
+      content: "最终答案还在生成中"
+    })
+  );
+  await service.flush("run_1", "msg_1");
+
+  conversationStore.update("run_1", "msg_1", {
+    phase: "completed",
+    content: "最终答案已完成"
   });
   await service.flush("run_1", "msg_1");
 

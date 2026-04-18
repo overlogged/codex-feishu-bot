@@ -116,13 +116,77 @@ function createGroupControlAgent(
   overrides: Partial<GroupControlAgent> = {}
 ): GroupControlAgent {
   return {
-    async interpret(message, context) {
-      return overrides.interpret?.(message, context) ?? {
-        kind: "help",
-        detail: "unsupported in test"
-      };
+    async interpret(message, context, options) {
+      return (
+        overrides.interpret?.(message, context, options) ?? {
+          intents: [
+            {
+              kind: "help",
+              detail: "unsupported in test"
+            }
+          ],
+          threadId: "thread_control_default"
+        }
+      );
     }
   };
+}
+
+function createControlResult(
+  intent: GroupControlIntent | GroupControlIntent[],
+  threadId = "thread_control_1"
+) {
+  return {
+    intents: Array.isArray(intent) ? intent : [intent],
+    threadId
+  };
+}
+
+function createControlSession(overrides: Partial<IncomingChatMessage> = {}) {
+  return createMessage({
+    mentionsBot: true,
+    text: "@托帕 看看这个群现在绑到哪",
+    ...overrides
+  });
+}
+
+function assertMentionedControlReply(content: string | undefined, senderId: string, senderName: string) {
+  assert.match(content ?? "", new RegExp(`<at user_id="${senderId}">${senderName}</at>`));
+}
+
+function createNoopCodexWorker(): CodexWorker {
+  return {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      return undefined;
+    }
+  };
+}
+
+function createNoopDeliveryService() {
+  return {
+    schedule() {
+      return undefined;
+    },
+    async flushRun() {
+      return undefined;
+    }
+  } as never;
+}
+
+function createBoundWorkspaceResolver() {
+  return createWorkspaceResolver({
+    async resolve() {
+      return {
+        ok: true,
+        workspaceId: "/home/overlogged/Quant",
+        cli: "codex",
+        executionMode: "host"
+      };
+    }
+  });
 }
 
 function createScheduleService(overrides: {
@@ -134,6 +198,20 @@ function createScheduleService(overrides: {
     prompt: string;
     createdById?: string;
     createdByName?: string;
+  }) =>
+    | {
+        ok: true;
+        task: ScheduledTaskRecord;
+      }
+    | {
+        ok: false;
+        detail: string;
+      };
+  updateTask?: (input: {
+    chatId: string;
+    taskId: string;
+    cron?: string;
+    prompt?: string;
   }) =>
     | {
         ok: true;
@@ -197,6 +275,19 @@ function createScheduleService(overrides: {
     }) {
       return (
         overrides.createTask?.(input) ?? {
+          ok: false,
+          detail: "not implemented"
+        }
+      );
+    },
+    updateTask(input: {
+      chatId: string;
+      taskId: string;
+      cron?: string;
+      prompt?: string;
+    }) {
+      return (
+        overrides.updateTask?.(input) ?? {
           ok: false,
           detail: "not implemented"
         }
@@ -380,6 +471,97 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
   assert.equal(runTurnCalls, 0);
   assert.equal(runStore.list().length, 1);
   assert.equal(runStore.list()[0]?.sourceMessageId, "om_group_steer_1");
+});
+
+test("ChatOrchestrator interrupts the active Kimi turn and runs the latest message", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  runStore.save({
+    runId: "run_active",
+    chatId: "oc_group_1",
+    threadId: "thread_kimi_1",
+    sourceMessageId: "om_original_1",
+    status: "running",
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  sessionStore.save({
+    chatId: "oc_group_1",
+    threadId: "thread_kimi_1",
+    cli: "kimi",
+    workspaceId: "/workspace",
+    executionMode: "docker",
+    activeRunId: "run_active",
+    activeTurnId: "turn_kimi_active_1",
+    updatedAt: new Date().toISOString()
+  });
+
+  let interruptCalls = 0;
+  let runTurnCalls = 0;
+  const codexWorker: CodexWorker = {
+    supportsSteer() {
+      return false;
+    },
+    async ensureThread() {
+      return "thread_kimi_1";
+    },
+    async interruptTurn(context) {
+      interruptCalls += 1;
+      assert.equal(context.threadId, "thread_kimi_1");
+      assert.equal(context.turnId, "turn_kimi_active_1");
+      assert.equal(context.interruptionMessage, "当前任务已被后续消息中断。");
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+      assert.equal(context.threadId, "thread_kimi_1");
+      assert.equal(context.message.messageId, "om_group_kimi_followup_1");
+      yield {
+        kind: "thread_bound",
+        threadId: "thread_kimi_1"
+      };
+      yield {
+        kind: "turn_bound",
+        turnId: "turn_kimi_replacement_1"
+      };
+      yield {
+        kind: "run_status",
+        status: "completed"
+      };
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient(),
+    createNoopDeliveryService(),
+    projector,
+    codexWorker,
+    createWorkspaceResolver(),
+    createScheduleService(),
+    "/workspace",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      messageId: "om_group_kimi_followup_1",
+      text: "这条新消息应该直接接管当前 Kimi turn"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(interruptCalls, 1);
+  assert.equal(runTurnCalls, 1);
+  assert.equal(runStore.get("run_active")?.status, "failed");
+  assert.equal(runStore.get("run_active")?.errorMessage, "当前任务已被后续消息中断。");
+  assert.equal(runStore.list().length, 2);
+  assert.equal(runStore.list()[1]?.sourceMessageId, "om_group_kimi_followup_1");
+  assert.equal(sessionStore.get("oc_group_1")?.activeRunId, undefined);
 });
 
 test("ChatOrchestrator ignores app-sent group messages to avoid loops", async () => {
@@ -669,6 +851,87 @@ test("ChatOrchestrator rejects group messages when workspace is not configured",
   assert.deepEqual(sentTexts, ["请先配置工作区"]);
 });
 
+test("ChatOrchestrator surfaces ensureThread failures for reusable sessions", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const scheduledItemIds: string[] = [];
+  let ensureThreadCalls = 0;
+  let runTurnCalls = 0;
+
+  sessionStore.save({
+    chatId: "oc_group_1",
+    chatType: "group",
+    chatName: "docker-group",
+    chatDisplayName: "docker-group",
+    threadId: "thread_existing_docker",
+    cli: "codex",
+    workspaceId: "/home/overlogged/QuantDev",
+    executionMode: "docker",
+    updatedAt: new Date().toISOString()
+  });
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      ensureThreadCalls += 1;
+      throw new Error("Docker 模式当前不可用：bot 进程没有访问 Docker daemon 的权限。");
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient(),
+    {
+      schedule(item: ConversationItem) {
+        scheduledItemIds.push(item.itemId);
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({
+      async resolve() {
+        return {
+          ok: true,
+          workspaceId: "/home/overlogged/QuantDev",
+          cli: "codex",
+          executionMode: "docker"
+        };
+      }
+    }),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      messageId: "om_docker_error_1",
+      text: "继续"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(ensureThreadCalls, 1);
+  assert.equal(runTurnCalls, 0);
+  assert.equal(runStore.list().length, 1);
+  assert.equal(runStore.list()[0]?.status, "failed");
+  assert.match(runStore.list()[0]?.errorMessage ?? "", /Docker 模式当前不可用/);
+  assert.deepEqual(scheduledItemIds, [`error:${runStore.list()[0]!.runId}`]);
+  assert.match(conversationStore.list()[0]?.content ?? "", /Docker 模式当前不可用/);
+  assert.equal(sessionStore.get("oc_group_1")?.activeRunId, undefined);
+  assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_existing_docker");
+});
+
 test("ChatOrchestrator lists workspace catalog in direct chats without starting a run", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();
@@ -805,21 +1068,21 @@ test("ChatOrchestrator binds group workspace when mentioned with a numeric code"
     "/home/overlogged",
     createLogger(),
     createGroupControlAgent({
-      async interpret() {
-        return {
+      async interpret(_message, _context, options) {
+        assert.equal(options?.controlThreadId, undefined);
+        return createControlResult({
           kind: "bind_workspace",
           cli: "codex",
           executionMode: "host",
           code: "12"
-        };
+        });
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
+    createControlSession({
       messageId: "om_group_bind_1",
-      mentionsBot: true,
       text: "@托帕 12"
     })
   );
@@ -830,8 +1093,11 @@ test("ChatOrchestrator binds group workspace when mentioned with a numeric code"
   assert.equal(runStore.list().length, 0);
   assert.deepEqual(replyMessageIds, [undefined]);
   assert.deepEqual(replyInThreads, [undefined]);
+  assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
   assert.match(sentTexts[0] ?? "", /已将这个群绑定到 Host 模式的 Codex CLI 工作区 12: Quant\/project-a/);
-  assert.match(sentTexts[0] ?? "", /后续这个群里的任务都会通过 host \/ codex 从 \/home\/overlogged\/Quant\/project-a 启动/);
+  assert.match(sentTexts[0] ?? "", /群里 @机器人的消息会继续进入这个群单独复用的配置线程/);
+  assert.equal(sessionStore.get("oc_group_1")?.controlThreadId, "thread_control_1");
+  assert.equal(sessionStore.get("oc_group_1")?.controlReplyToMessageId, undefined);
 });
 
 test("ChatOrchestrator binds group workspace with an explicit cli selector", async () => {
@@ -894,20 +1160,19 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        return {
+        return createControlResult({
           kind: "bind_workspace",
           cli: "claude",
           executionMode: "host",
           code: "12"
-        };
+        });
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
+    createControlSession({
       messageId: "om_group_bind_claude_1",
-      mentionsBot: true,
       text: "@托帕 claude 12"
     })
   );
@@ -984,20 +1249,19 @@ test("ChatOrchestrator binds group workspace with an explicit docker selector", 
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        return {
+        return createControlResult({
           kind: "bind_workspace",
           cli: "codex",
           executionMode: "docker",
           code: "12"
-        };
+        });
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
+    createControlSession({
       messageId: "om_group_bind_docker_1",
-      mentionsBot: true,
       text: "@托帕 docker codex 12"
     })
   );
@@ -1094,19 +1358,18 @@ test("ChatOrchestrator creates a group scheduled task without starting a run", a
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        return {
+        return createControlResult({
           kind: "create_schedule",
           cron: "0 9 * * 1-5",
           prompt: "生成工作日报"
-        };
+        });
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
+    createControlSession({
       messageId: "om_group_schedule_add_1",
-      mentionsBot: true,
       text: "@托帕 定时任务 添加 0 9 * * 1-5 | 生成工作日报"
     })
   );
@@ -1127,117 +1390,210 @@ test("ChatOrchestrator creates a group scheduled task without starting a run", a
   assert.match(sentTexts[0] ?? "", /工作区：\/home\/overlogged\/Quant/);
 });
 
-test("ChatOrchestrator routes group mentions into the configured session when they are not control commands", async () => {
+test("ChatOrchestrator executes multiple control actions in order", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();
   const conversationStore = new ConversationStore();
   const projector = new MessageProjector(runStore, conversationStore);
-  let ensureThreadCalls = 0;
-  let groupControlInterpretCalls = 0;
-  let resolveTurn: (() => void) | undefined;
-  const turnCompleted = new Promise<void>((resolve) => {
-    resolveTurn = resolve;
-  });
-
-  sessionStore.save({
-    chatId: "oc_group_1",
-    chatType: "group",
-    chatName: "测试群",
-    chatDisplayName: "测试群",
-    threadId: "thread_group_existing",
-    cli: "codex",
-    workspaceId: "/home/overlogged/Quant",
-    updatedAt: new Date().toISOString()
-  });
-
-  const codexWorker: CodexWorker = {
-    async ensureThread() {
-      ensureThreadCalls += 1;
-      return "thread_group_existing";
-    },
-    async *runTurn(context): AsyncGenerator<CodexEvent> {
-      assert.equal(context.threadId, "thread_group_existing");
-      assert.equal(context.message.chatId, "oc_group_1");
-      assert.equal(context.message.mentionsBot, true);
-      assert.equal(context.message.text, "@托帕 帮我继续看一下这个项目");
-      yield {
-        kind: "thread_bound",
-        threadId: "thread_group_existing"
-      };
-      yield {
-        kind: "turn_bound",
-        turnId: "turn_group_existing"
-      };
-      yield {
-        kind: "assistant_message_started",
-        itemId: "msg_group_mention_1",
-        source: "final_answer"
-      };
-      yield {
-        kind: "assistant_message_completed",
-        itemId: "msg_group_mention_1",
-        text: "继续检查这个项目。"
-      };
-      resolveTurn?.();
-    }
-  };
+  const sentTexts: string[] = [];
+  const replyMessageIds: Array<string | undefined> = [];
+  let bound = false;
+  let createTaskInput:
+    | {
+        chatId: string;
+        cron: string;
+        prompt: string;
+        createdById?: string;
+        createdByName?: string;
+      }
+    | undefined;
 
   const orchestrator = new ChatOrchestrator(
     sessionStore,
     runStore,
     conversationStore,
-    createFeishuClient(),
-    {
-      schedule() {
-        return undefined;
-      },
-      async flushRun() {
-        return undefined;
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        replyMessageIds.push(input.replyToMessageId);
+        return `om_text_multi_${sentTexts.length}`;
       }
-    } as never,
+    }),
+    createNoopDeliveryService(),
     projector,
-    codexWorker,
+    createNoopCodexWorker(),
     createWorkspaceResolver({
       async resolve() {
+        if (!bound) {
+          return {
+            ok: false,
+            reason: "group_workspace_unconfigured",
+            detail: "这个群还没有绑定工作区。",
+            configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json",
+            chatId: "oc_group_1"
+          };
+        }
+
         return {
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
           executionMode: "host"
         };
+      },
+      async bindGroupWorkspace() {
+        bound = true;
+        return {
+          ok: true,
+          cli: "codex",
+          executionMode: "host",
+          entry: {
+            code: "12",
+            workspace: "Quant",
+            workspaceId: "/home/overlogged/Quant"
+          },
+          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
+        };
       }
     }),
-    createScheduleService(),
+    createScheduleService({
+      createTask(input) {
+        createTaskInput = input;
+        return {
+          ok: true,
+          task: {
+            chatId: input.chatId,
+            taskId: "4",
+            cron: input.cron,
+            prompt: input.prompt,
+            status: "enabled",
+            createdAt: "2026-04-04T00:00:00.000Z",
+            updatedAt: "2026-04-04T00:00:00.000Z",
+            nextRunAt: "2026-04-04T01:00:00.000Z",
+            createdById: input.createdById,
+            createdByName: input.createdByName
+          }
+        };
+      }
+    }),
     "/home/overlogged",
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        groupControlInterpretCalls += 1;
-        return {
-          kind: "help",
-          detail: "should not run"
-        };
+        return createControlResult([
+          {
+            kind: "bind_workspace",
+            cli: "codex",
+            executionMode: "host",
+            code: "12"
+          },
+          {
+            kind: "create_schedule",
+            cron: "0 9 * * 1-5",
+            prompt: "生成工作日报"
+          }
+        ]);
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
-      messageId: "om_group_mention_plain_1",
-      mentionsBot: true,
-      text: "@托帕 帮我继续看一下这个项目"
+    createControlSession({
+      messageId: "om_group_multi_action_1",
+      text: "@托帕 把这个群绑定到 codex 的 12 号目录，然后工作日早上 9 点生成工作日报"
     })
   );
 
-  await turnCompleted;
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.equal(groupControlInterpretCalls, 0);
-  assert.equal(ensureThreadCalls, 1);
-  assert.equal(runStore.list().length, 1);
-  assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_group_existing");
-  assert.equal(conversationStore.list().length, 1);
-  assert.match(conversationStore.list()[0]?.content ?? "", /继续检查这个项目/);
+  assert.deepEqual(createTaskInput, {
+    chatId: "oc_group_1",
+    cron: "0 9 * * 1-5",
+    prompt: "生成工作日报",
+    createdById: "ou_user_1",
+    createdByName: "user-1"
+  });
+  assert.equal(sentTexts.length, 2);
+  assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
+  assert.doesNotMatch(sentTexts[1] ?? "", /<at user_id=/);
+  assert.deepEqual(replyMessageIds, [undefined, undefined]);
+  assert.match(sentTexts[0] ?? "", /已将这个群绑定到 Host 模式的 Codex CLI 工作区 12: Quant/);
+  assert.match(sentTexts[1] ?? "", /已创建这个群的定时任务 4/);
+});
+
+test("ChatOrchestrator routes natural-language group mentions into the reusable control thread", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+  const replyMessageIds: Array<string | undefined> = [];
+  const replyInThreads: Array<boolean | undefined> = [];
+  let groupControlInterpretCalls = 0;
+
+  sessionStore.save({
+    chatId: "oc_group_1",
+    chatType: "group",
+    chatName: "测试群",
+    chatDisplayName: "测试群",
+    threadId: "thread_group_main",
+    cli: "codex",
+    workspaceId: "/home/overlogged/Quant",
+    executionMode: "host",
+    controlThreadId: "thread_control_existing",
+    controlReplyToMessageId: "om_group_control_root_1",
+    updatedAt: new Date().toISOString()
+  });
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        replyMessageIds.push(input.replyToMessageId);
+        replyInThreads.push(input.replyInThread);
+        return "om_text_group_control_help";
+      }
+    }),
+    createNoopDeliveryService(),
+    projector,
+    createNoopCodexWorker(),
+    createBoundWorkspaceResolver(),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret(_message, _context, options) {
+        groupControlInterpretCalls += 1;
+        assert.equal(options?.controlThreadId, "thread_control_existing");
+        return createControlResult({
+          kind: "help",
+          detail: "请直接说你想怎么配置这个群。"
+        }, "thread_control_existing");
+      }
+    })
+  );
+
+  orchestrator.enqueue(
+    createControlSession({
+      messageId: "om_group_mention_plain_1",
+      text: "@托帕 帮我把这个群切到 docker 模式"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(groupControlInterpretCalls, 1);
+  assert.equal(runStore.list().length, 0);
+  assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_group_main");
+  assert.equal(sessionStore.get("oc_group_1")?.controlThreadId, "thread_control_existing");
+  assert.equal(sessionStore.get("oc_group_1")?.controlReplyToMessageId, "om_group_control_root_1");
+  assert.deepEqual(replyMessageIds, [undefined]);
+  assert.deepEqual(replyInThreads, [undefined]);
+  assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
+  assert.match(sentTexts[0] ?? "", /请直接说你想怎么配置这个群/);
 });
 
 test("ChatOrchestrator routes scheduled tasks into the active session", async () => {
@@ -1304,9 +1660,9 @@ test("ChatOrchestrator routes scheduled tasks into the active session", async ()
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        return {
+        return createControlResult({
           kind: "new_session"
-        };
+        });
       }
     })
   );
@@ -1390,17 +1746,16 @@ test("ChatOrchestrator creates a fresh session when asked", async () => {
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        return {
+        return createControlResult({
           kind: "new_session"
-        };
+        });
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
+    createControlSession({
       messageId: "om_group_new_session_1",
-      mentionsBot: true,
       text: "@托帕 新会话"
     })
   );
@@ -1492,17 +1847,16 @@ test("ChatOrchestrator interrupts the active run before creating a fresh session
     createLogger(),
     createGroupControlAgent({
       async interpret() {
-        return {
+        return createControlResult({
           kind: "new_session"
-        };
+        });
       }
     })
   );
 
   orchestrator.enqueue(
-    createMessage({
+    createControlSession({
       messageId: "om_group_new_session_interrupt_1",
-      mentionsBot: true,
       text: "@托帕 新会话"
     })
   );

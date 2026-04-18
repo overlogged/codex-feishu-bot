@@ -43,6 +43,12 @@ type ScheduleCommand =
       prompt: string;
     }
   | {
+      kind: "update";
+      taskId: string;
+      cron?: string;
+      prompt?: string;
+    }
+  | {
       kind: "delete" | "pause" | "resume";
       taskId: string;
     }
@@ -208,23 +214,27 @@ function renderScheduleHelp(): string {
     "4. @机器人 定时任务 删除 1",
     "5. @机器人 定时任务",
     "",
-    "定时任务当前使用显式 cron，不再走单独的群控制线程。"
+    "这些命令都会进入这个群自己的配置线程。",
+    "也支持自然语言连着说多个动作，例如“暂停 1，再把 2 改成工作日 9 点发日报”。"
   ].join("\n");
 }
 
 function renderControlHelp(defaultWorkspace: string): string {
   return [
-    "群里可以直接发普通消息，也可以 @机器人。",
-    "@机器人 不会再切到单独控制线程；它会继续走这个群当前绑定的会话。",
+    "群里直接发普通消息，就是项目会话。",
+    "群里 @机器人，会进入这个群单独的配置线程，而且会持续复用。",
     "",
     "常见命令：",
     "1. 私聊机器人发送 工作区，先拿目录编号",
     "2. 群里发 @机器人 12",
     "3. 群里发 @机器人 claude 12",
     "4. 群里发 @机器人 docker 12",
-    "5. 群里发 @机器人 新会话",
-    "6. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
+    "5. 群里发 @机器人 docker kimi 12",
+    "6. 群里发 @机器人 新会话",
+    "7. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
     "",
+    "也支持自然语言，比如“把这个群切到 docker 的 codex 12 号目录”“看看这个群现在绑到哪”。",
+    "如果一句话里有多个配置动作，也会按顺序执行，比如“先暂停 1，再把 2 改成工作日 9 点发日报”。",
     "执行模式默认是 host；如果明确说 docker，就会进入受限容器模式。",
     `工作区根目录是 ${defaultWorkspace}，只列一级子目录。`
   ].join("\n");
@@ -246,15 +256,52 @@ function renderWorkspaceCatalogMessage(
         "支持的 CLI：codex / claude / kimi",
         "你可以直接说：",
         "@机器人 把这个群绑定到 codex 的 2 号目录",
-        "@机器人 把这个群切到 claude 的 Quant"
+        "@机器人 把这个群切到 claude 的 Quant",
+        "@机器人 把这个群切到 docker 的 kimi 2 号目录"
       ].join("\n");
 }
 
-function buildThreadReplyMetadata(_message: IncomingChatMessage): {
+type TextNoticeReplyMetadata = {
   replyToMessageId?: string;
   replyInThread?: boolean;
-} {
-  return {};
+  mentionSenderId?: string;
+  mentionSenderName?: string;
+};
+
+type TextNoticeMetadata = TextNoticeReplyMetadata & {
+  messageId?: string;
+  context: string;
+};
+
+function escapeFeishuTextValue(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeFeishuAttributeValue(value: string): string {
+  return escapeFeishuTextValue(value).replaceAll('"', "&quot;");
+}
+
+function renderMentionTag(senderId: string, senderName: string): string {
+  return `<at user_id="${escapeFeishuAttributeValue(senderId)}">${escapeFeishuTextValue(
+    senderName
+  )}</at>`;
+}
+
+function buildControlReplyMetadata(message: IncomingChatMessage): TextNoticeReplyMetadata {
+  if (message.chatType === "group" && message.mentionsBot && message.senderId) {
+    return {
+      mentionSenderId: message.senderId,
+      mentionSenderName: message.senderName.trim() || "你"
+    };
+  }
+
+  return {
+    mentionSenderId: undefined,
+    mentionSenderName: undefined
+  };
 }
 
 function summarizeMessagePreview(text: string): string | undefined {
@@ -342,6 +389,34 @@ function buildSessionMetadataPatch(
   };
 }
 
+function buildControlSessionPatch(
+  message: IncomingChatMessage,
+  existingSession: ChatSession | undefined,
+  patch: Pick<ChatSession, "controlThreadId" | "controlReplyToMessageId">,
+  defaultWorkspace: string,
+  observedAt = new Date().toISOString()
+): ChatSession {
+  return {
+    chatId: message.chatId,
+    threadId: existingSession?.threadId ?? `pending:group-session:${message.chatId}:unconfigured`,
+    cli: existingSession?.cli ?? "codex",
+    workspaceId: existingSession?.workspaceId ?? defaultWorkspace,
+    executionMode: normalizeExecutionMode(existingSession?.executionMode),
+    ...existingSession,
+    ...patch,
+    chatType: message.chatType || existingSession?.chatType,
+    chatName: message.chatName ?? existingSession?.chatName,
+    chatDisplayName: resolveChatDisplayName(message, existingSession),
+    lastInboundAt: existingSession?.lastInboundAt,
+    lastSenderId: existingSession?.lastSenderId,
+    lastSenderName: existingSession?.lastSenderName,
+    lastMessageId: existingSession?.lastMessageId,
+    lastMessagePreview: existingSession?.lastMessagePreview,
+    lastUserMessagePreview: existingSession?.lastUserMessagePreview,
+    updatedAt: observedAt
+  };
+}
+
 function renderScheduleList(tasks: ScheduledTaskRecord[]): string {
   if (tasks.length === 0) {
     return [renderScheduleHelp(), "", "这个群目前还没有定时任务。"].join("\n");
@@ -387,8 +462,13 @@ export class ChatOrchestrator {
     private readonly groupControlAgent: GroupControlAgent = {
       async interpret() {
         return {
-          kind: "help",
-          detail: "这个环境还没有配置群控制 agent。"
+          intents: [
+            {
+              kind: "help",
+              detail: "这个环境还没有配置群控制 agent。"
+            }
+          ],
+          threadId: "pending:group-control:missing"
         };
       }
     }
@@ -436,11 +516,11 @@ export class ChatOrchestrator {
   }
 
   private async processIncomingMessage(message: IncomingChatMessage): Promise<void> {
-    this.touchExistingSession(message);
-
     if (await this.handleControlMessage(message)) {
       return;
     }
+
+    this.touchExistingSession(message);
 
     const existingSession = this.sessionStore.get(message.chatId);
     const workspaceResolution = await this.workspaceResolver.resolve({
@@ -468,25 +548,38 @@ export class ChatOrchestrator {
       return;
     }
 
-    if (
+    const matchesActiveSession =
       existingSession?.activeRunId &&
-      this.canSteer({
-        session: existingSession,
-        cli: workspaceResolution.cli,
-        workspaceId: workspaceResolution.workspaceId,
-        executionMode: workspaceResolution.executionMode,
-        message
-      }) &&
       existingSession.workspaceId === workspaceResolution.workspaceId &&
       existingSession.cli === workspaceResolution.cli &&
-      normalizeExecutionMode(existingSession.executionMode) === workspaceResolution.executionMode
-    ) {
-      await this.dispatchActiveOrNew(existingSession, message, {
-        cli: workspaceResolution.cli,
-        workspaceId: workspaceResolution.workspaceId,
-        executionMode: workspaceResolution.executionMode
-      });
-      return;
+      normalizeExecutionMode(existingSession.executionMode) === workspaceResolution.executionMode;
+
+    if (matchesActiveSession) {
+      if (
+        this.canSteer({
+          session: existingSession,
+          cli: workspaceResolution.cli,
+          workspaceId: workspaceResolution.workspaceId,
+          executionMode: workspaceResolution.executionMode,
+          message
+        })
+      ) {
+        await this.dispatchActiveOrNew(existingSession, message, {
+          cli: workspaceResolution.cli,
+          workspaceId: workspaceResolution.workspaceId,
+          executionMode: workspaceResolution.executionMode
+        });
+        return;
+      }
+
+      if (this.canInterruptForLatestMessage(workspaceResolution.cli)) {
+        await this.interruptActiveRunForLatestMessage(existingSession, message, {
+          cli: workspaceResolution.cli,
+          workspaceId: workspaceResolution.workspaceId,
+          executionMode: workspaceResolution.executionMode
+        });
+        return;
+      }
     }
 
     await this.handleMessage(message, workspaceResolution);
@@ -511,20 +604,12 @@ export class ChatOrchestrator {
       normalizeExecutionMode(existingSession.executionMode) === resolvedExecutionMode
         ? existingSession
         : undefined;
-    const threadId = reusableSession
-      ? await this.codexWorker.ensureThread({
-          session: reusableSession,
-          cli: resolvedCli,
-          workspaceId: resolvedWorkspaceId,
-          executionMode: resolvedExecutionMode,
-          message
-        })
-      : `pending:${message.chatId}:${Date.now()}`;
+    const initialThreadId = reusableSession?.threadId ?? `pending:${message.chatId}:${Date.now()}`;
     const observedAt = new Date().toISOString();
 
     this.sessionStore.save({
       chatId: message.chatId,
-      threadId,
+      threadId: initialThreadId,
       cli: resolvedCli,
       workspaceId: resolvedWorkspaceId,
       executionMode: resolvedExecutionMode,
@@ -536,13 +621,35 @@ export class ChatOrchestrator {
 
     const run = this.runStore.create({
       chatId: message.chatId,
-      threadId,
+      threadId: initialThreadId,
       sourceMessageId: message.messageId
     });
 
     this.sessionStore.attachRun(message.chatId, run.runId);
 
     try {
+      const threadId = reusableSession
+        ? await this.codexWorker.ensureThread({
+            session: this.sessionStore.get(message.chatId),
+            cli: resolvedCli,
+            workspaceId: resolvedWorkspaceId,
+            executionMode: resolvedExecutionMode,
+            message
+          })
+        : initialThreadId;
+
+      if (threadId !== initialThreadId) {
+        this.runStore.update(run.runId, {
+          threadId
+        });
+        this.sessionStore.updateBoundRun(message.chatId, run.runId, {
+          threadId,
+          cli: resolvedCli,
+          workspaceId: resolvedWorkspaceId,
+          executionMode: resolvedExecutionMode
+        });
+      }
+
       for await (const event of this.codexWorker.runTurn({
         session: this.sessionStore.get(message.chatId),
         cli: resolvedCli,
@@ -698,6 +805,49 @@ export class ChatOrchestrator {
     await this.handleMessage(message, routing);
   }
 
+  private async interruptActiveRunForLatestMessage(
+    existingSession: ChatSession,
+    message: IncomingChatMessage,
+    routing: {
+      workspaceId: string;
+      cli: ChatCli;
+      executionMode: ChatExecutionMode;
+    }
+  ): Promise<void> {
+    const activeRunId = existingSession.activeRunId;
+    if (!activeRunId || !this.codexWorker.interruptTurn) {
+      await this.handleMessage(message, routing);
+      return;
+    }
+
+    const turnId =
+      existingSession.activeTurnId ?? (await this.waitForActiveTurnId(message.chatId, activeRunId));
+    if (!turnId) {
+      await this.sendTextNotice(message.chatId, "这个群当前任务还在启动，暂时无法切换到最新消息。请稍后再发一次。", {
+        messageId: message.messageId,
+        context: "发送 Kimi 最新消息接管提示失败"
+      });
+      return;
+    }
+
+    const interruptionMessage = "当前任务已被后续消息中断。";
+
+    await this.codexWorker.interruptTurn({
+      session: existingSession,
+      cli: existingSession.cli,
+      workspaceId: existingSession.workspaceId,
+      executionMode: normalizeExecutionMode(existingSession.executionMode),
+      message,
+      threadId: existingSession.threadId,
+      turnId,
+      interruptionMessage
+    });
+
+    this.runStore.setStatus(activeRunId, "failed", interruptionMessage);
+    this.sessionStore.releaseRun(message.chatId, activeRunId);
+    await this.handleMessage(message, routing);
+  }
+
   getDebugState() {
     return {
       sessions: this.sessionStore.list(),
@@ -761,6 +911,11 @@ export class ChatOrchestrator {
   }
 
   private async handleControlMessage(message: IncomingChatMessage): Promise<boolean> {
+    if (message.chatType === "group" && message.mentionsBot) {
+      await this.handleGroupMentionControlMessage(message);
+      return true;
+    }
+
     if (message.chatType === "p2p" && isWorkspaceCatalogCommand(message.text)) {
       const entries = await this.workspaceResolver.listCatalog();
       const content = renderWorkspaceCatalogMessage(entries, this.defaultWorkspace);
@@ -771,12 +926,12 @@ export class ChatOrchestrator {
       return true;
     }
 
-    if (isNewSessionCommand(message)) {
+    if (message.chatType !== "group" && isNewSessionCommand(message)) {
       await this.handleNewSessionCommand(message);
       return true;
     }
 
-    const scheduleCommand = parseScheduleCommand(message);
+    const scheduleCommand = message.chatType === "group" ? undefined : parseScheduleCommand(message);
     if (scheduleCommand) {
       await this.handleScheduleCommand(message, scheduleCommand);
       return true;
@@ -816,31 +971,51 @@ export class ChatOrchestrator {
   }
 
   private async handleGroupMentionControlMessage(message: IncomingChatMessage): Promise<void> {
-    const replyMetadata = buildThreadReplyMetadata(message);
     const existingSession = this.sessionStore.get(message.chatId);
-    const currentBindingResolution = await this.workspaceResolver.resolve({
-      message,
-      session: existingSession
-    });
+    const replyMetadata = buildControlReplyMetadata(message);
     const catalog = await this.workspaceResolver.listCatalog();
 
-    let intent: GroupControlIntent;
+    let intents: GroupControlIntent[];
+    let controlThreadId = existingSession?.controlThreadId;
     try {
-      intent = await this.groupControlAgent.interpret(message, {
-        catalog,
-        scheduledTasks: this.scheduleService.listByChat(message.chatId),
-        currentBinding: currentBindingResolution.ok
-          ? {
-              configured: true,
-              cli: currentBindingResolution.cli,
-              executionMode: currentBindingResolution.executionMode,
-              workspaceId: currentBindingResolution.workspaceId
-            }
-          : {
-              configured: false,
-              detail: currentBindingResolution.detail
-            }
+      const currentBindingResolution = await this.workspaceResolver.resolve({
+        message,
+        session: existingSession
       });
+      const result = await this.groupControlAgent.interpret(
+        message,
+        {
+          catalog,
+          scheduledTasks: this.scheduleService.listByChat(message.chatId),
+          currentBinding: currentBindingResolution.ok
+            ? {
+                configured: true,
+                cli: currentBindingResolution.cli,
+                executionMode: currentBindingResolution.executionMode,
+                workspaceId: currentBindingResolution.workspaceId
+              }
+            : {
+                configured: false,
+                detail: currentBindingResolution.detail
+              }
+        },
+        {
+          controlThreadId
+        }
+      );
+      intents = result.intents;
+      controlThreadId = result.threadId;
+      this.sessionStore.save(
+        buildControlSessionPatch(
+          message,
+          existingSession,
+          {
+            controlThreadId,
+            controlReplyToMessageId: existingSession?.controlReplyToMessageId
+          },
+          this.defaultWorkspace
+        )
+      );
     } catch (error) {
       await this.sendTextNotice(
         message.chatId,
@@ -857,6 +1032,24 @@ export class ChatOrchestrator {
       );
       return;
     }
+
+    let metadataForNextReply = replyMetadata;
+    for (const intent of intents) {
+      await this.executeGroupControlIntent(message, intent, catalog, metadataForNextReply);
+      metadataForNextReply = {};
+    }
+  }
+
+  private async executeGroupControlIntent(
+    message: IncomingChatMessage,
+    intent: GroupControlIntent,
+    catalog: Awaited<ReturnType<ChatWorkspaceResolver["listCatalog"]>>,
+    replyMetadata: TextNoticeReplyMetadata
+  ): Promise<void> {
+    const currentBindingResolution = await this.workspaceResolver.resolve({
+      message,
+      session: this.sessionStore.get(message.chatId)
+    });
 
     switch (intent.kind) {
       case "list_workspaces":
@@ -901,7 +1094,7 @@ export class ChatOrchestrator {
             ? [
                 `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}`,
                 `后续普通群消息会通过 ${result.executionMode} / ${result.cli} 从 ${result.entry.workspaceId} 启动。`,
-                "群里 @机器人的普通消息也会继续走这个群当前绑定的会话。"
+                "群里 @机器人的消息会继续进入这个群单独复用的配置线程。"
               ].join("\n")
             : [result.detail, "", renderWorkspaceCatalogMessage(catalog, this.defaultWorkspace)].join("\n"),
           {
@@ -913,17 +1106,33 @@ export class ChatOrchestrator {
         return;
       }
       case "list_schedules":
-        await this.sendTextNotice(message.chatId, renderScheduleList(this.scheduleService.listByChat(message.chatId)), {
-          messageId: message.messageId,
-          context: "发送定时任务列表失败",
-          ...replyMetadata
-        });
+        await this.sendTextNotice(
+          message.chatId,
+          renderScheduleList(this.scheduleService.listByChat(message.chatId)),
+          {
+            messageId: message.messageId,
+            context: "发送定时任务列表失败",
+            ...replyMetadata
+          }
+        );
         return;
       case "create_schedule":
         await this.handleScheduleCommand(
           message,
           {
             kind: "add",
+            cron: intent.cron,
+            prompt: intent.prompt
+          },
+          replyMetadata
+        );
+        return;
+      case "update_schedule":
+        await this.handleScheduleCommand(
+          message,
+          {
+            kind: "update",
+            taskId: intent.taskId,
             cron: intent.cron,
             prompt: intent.prompt
           },
@@ -980,10 +1189,7 @@ export class ChatOrchestrator {
   private async handleScheduleCommand(
     message: IncomingChatMessage,
     command: ScheduleCommand,
-    replyMetadata: {
-      replyToMessageId?: string;
-      replyInThread?: boolean;
-    } = {}
+    replyMetadata: TextNoticeReplyMetadata = {}
   ): Promise<void> {
     if (message.chatType !== "group") {
       await this.sendTextNotice(message.chatId, "请在目标群里管理这个群自己的定时任务。", {
@@ -1044,6 +1250,30 @@ export class ChatOrchestrator {
       return;
     }
 
+    if (command.kind === "update") {
+      const result = this.scheduleService.updateTask({
+        chatId: message.chatId,
+        taskId: command.taskId,
+        cron: command.cron,
+        prompt: command.prompt
+      });
+      const content = result.ok
+        ? [
+            `已更新这个群的定时任务 ${result.task.taskId}。`,
+            `cron：${result.task.cron}`,
+            `状态：${result.task.status === "enabled" ? "启用中" : "已暂停"}`,
+            `下次触发：${formatScheduleTime(result.task.nextRunAt)}`,
+            `任务内容：${result.task.prompt}`
+          ].join("\n")
+        : [result.detail, "", renderScheduleHelp()].join("\n");
+      await this.sendTextNotice(message.chatId, content, {
+        messageId: message.messageId,
+        context: "发送定时任务更新结果失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
     if (command.kind === "delete") {
       const result = this.scheduleService.deleteTask(message.chatId, command.taskId);
       const content = result.ok
@@ -1094,10 +1324,7 @@ export class ChatOrchestrator {
 
   private async handleNewSessionCommand(
     message: IncomingChatMessage,
-    replyMetadata: {
-      replyToMessageId?: string;
-      replyInThread?: boolean;
-    } = {}
+    replyMetadata: TextNoticeReplyMetadata = {}
   ): Promise<void> {
     const existingSession = this.sessionStore.get(message.chatId);
     let interruptedActiveRun = false;
@@ -1214,6 +1441,7 @@ export class ChatOrchestrator {
     }
 
     try {
+      const interruptionMessage = "当前任务已被“新会话”中断。";
       await this.codexWorker.interruptTurn({
         session: latestSession,
         cli: latestSession.cli,
@@ -1221,9 +1449,10 @@ export class ChatOrchestrator {
         executionMode: normalizeExecutionMode(latestSession.executionMode),
         message,
         threadId: latestSession.threadId,
-        turnId
+        turnId,
+        interruptionMessage
       });
-      this.runStore.setStatus(existingSession.activeRunId, "failed", "已被“新会话”中断。");
+      this.runStore.setStatus(existingSession.activeRunId, "failed", interruptionMessage);
       this.sessionStore.releaseRun(message.chatId, existingSession.activeRunId);
       return {
         ok: true,
@@ -1257,10 +1486,7 @@ export class ChatOrchestrator {
 
   private async ensureGroupWorkspaceAvailable(
     message: IncomingChatMessage,
-    replyMetadata: {
-      replyToMessageId?: string;
-      replyInThread?: boolean;
-    } = {}
+    replyMetadata: TextNoticeReplyMetadata = {}
   ): Promise<
     | {
         workspaceId: string;
@@ -1329,6 +1555,10 @@ export class ChatOrchestrator {
     );
   }
 
+  private canInterruptForLatestMessage(cli: ChatCli): boolean {
+    return cli === "kimi" && Boolean(this.codexWorker.interruptTurn);
+  }
+
   private isDuplicateIncomingMessage(message: IncomingChatMessage): boolean {
     const now = Date.now();
     const ttlMs = 6 * 60 * 60 * 1000;
@@ -1372,17 +1602,17 @@ export class ChatOrchestrator {
   private async sendTextNotice(
     chatId: string,
     content: string,
-    metadata: {
-      messageId?: string;
-      context: string;
-      replyToMessageId?: string;
-      replyInThread?: boolean;
-    }
+    metadata: TextNoticeMetadata
   ): Promise<void> {
+    const prefixedContent =
+      metadata.mentionSenderId && metadata.mentionSenderName
+        ? `${renderMentionTag(metadata.mentionSenderId, metadata.mentionSenderName)}\n${content}`
+        : content;
+
     try {
       await this.feishuClient.sendText({
         chatId,
-        content,
+        content: prefixedContent,
         replyToMessageId: metadata.replyToMessageId,
         replyInThread: metadata.replyInThread
       });

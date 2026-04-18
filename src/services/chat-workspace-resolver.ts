@@ -307,7 +307,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       };
     }
 
-    if (configuredBinding.executionMode === "docker" && configuredBinding.cli !== "codex") {
+    if (configuredBinding.executionMode === "docker" && configuredBinding.cli === "claude") {
       return {
         ok: false,
         reason: "group_workspace_invalid",
@@ -315,8 +315,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         chatId: message.chatId,
         configuredWorkspace: configuredBinding.workspace,
         detail: [
-          `这个群当前配置的是 ${configuredBinding.cli} + docker，但 docker 模式暂时只支持 codex。`,
-          `请把 ${this.configFilePath} 里的 cli 改成 codex，或者把 executionMode 改回 host。`
+          `这个群当前配置的是 ${configuredBinding.cli} + docker，但 docker 模式暂时只支持 codex / kimi。`,
+          `请把 ${this.configFilePath} 里的 cli 改成 codex 或 kimi，或者把 executionMode 改回 host。`
         ].join("\n")
       };
     }
@@ -422,11 +422,11 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         configFilePath: string;
       }
   > {
-    if (input.executionMode === "docker" && input.cli !== "codex") {
+    if (input.executionMode === "docker" && input.cli === "claude") {
       return {
         ok: false,
         reason: "unsupported_execution_mode",
-        detail: "docker 模式当前只支持 codex。claude 和 kimi 仍然只能使用 host 裸金属模式。",
+        detail: "docker 模式当前只支持 codex / kimi。claude 仍然只能使用 host 裸金属模式。",
         configFilePath: this.configFilePath
       };
     }

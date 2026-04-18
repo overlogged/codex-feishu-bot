@@ -9,6 +9,7 @@ import { CodexAppServerWorker } from "./integrations/codex/app-server-worker.js"
 import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
 import { DockerCodexAppServerWorker } from "./integrations/codex/docker-codex-app-server-worker.js";
+import { DockerKimiCliWorker } from "./integrations/codex/docker-kimi-cli-worker.js";
 import { ExecutionModeRoutedCodexWorker } from "./integrations/codex/execution-mode-routed-worker.js";
 import { KimiCliWorker } from "./integrations/codex/kimi-cli-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
@@ -47,6 +48,18 @@ interface LoggerLike {
   error(message: unknown, ...args: unknown[]): void;
 }
 
+class UnsupportedCodexWorker implements CodexWorker {
+  constructor(private readonly message: string) {}
+
+  async ensureThread(): Promise<string> {
+    throw new Error(this.message);
+  }
+
+  async *runTurn() {
+    throw new Error(this.message);
+  }
+}
+
 function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
   if (env.CODEX_MODE === "app-server") {
     return new ExecutionModeRoutedCodexWorker(
@@ -55,7 +68,13 @@ function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
         claude: new ClaudeCliWorker(env, logger),
         kimi: new KimiCliWorker(env, logger)
       }),
-      new DockerCodexAppServerWorker(env, logger),
+      new MultiCliWorker({
+        codex: new DockerCodexAppServerWorker(env, logger),
+        claude: new UnsupportedCodexWorker(
+          "docker 模式当前只支持 codex / kimi。请把群绑定改回 host，或者切到 codex / kimi。"
+        ),
+        kimi: new DockerKimiCliWorker(env, logger)
+      }),
       logger
     );
   }

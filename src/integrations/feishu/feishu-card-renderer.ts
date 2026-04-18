@@ -266,7 +266,7 @@ export function splitAssistantCardBodies(
     return chunks.length === 1 ? chunks : [normalized];
   }
 
-  return chunks.map((chunk, index) => `**第 ${index + 1}/${chunks.length} 部分**\n\n${chunk}`);
+  return chunks;
 }
 
 function summarizeTitle(body: string, fallback: string, maxLength = 48): string {

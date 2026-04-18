@@ -53,22 +53,15 @@ export class ExecutionModeRoutedCodexWorker implements CodexWorker {
   }
 
   private selectWorker(context: CodexTurnContext): CodexWorker {
-    if ((context.executionMode ?? "host") !== "docker") {
-      return this.hostWorker;
-    }
-
-    if (context.cli !== "codex") {
-      this.logger?.warn(
-        {
-          cli: context.cli,
-          executionMode: context.executionMode,
-          chatId: context.message.chatId
-        },
-        "docker 模式当前只支持 codex"
-      );
-      throw new Error("docker 模式当前只支持 codex。请把群绑定改回 host，或者切回 codex。");
-    }
-
-    return this.dockerWorker;
+    const selectedWorker = (context.executionMode ?? "host") === "docker" ? this.dockerWorker : this.hostWorker;
+    this.logger?.info(
+      {
+        cli: context.cli,
+        executionMode: context.executionMode ?? "host",
+        chatId: context.message.chatId
+      },
+      "根据执行模式选择 worker"
+    );
+    return selectedWorker;
   }
 }

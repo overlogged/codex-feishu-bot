@@ -51,6 +51,35 @@ test("ChatScheduleService creates numbered tasks per chat", () => {
   assert.equal(first.ok && first.task.nextRunAt, "2026-04-04T01:00:00.000Z");
 });
 
+test("ChatScheduleService updates cron and prompt while preserving task identity", () => {
+  let now = new Date("2026-04-04T08:58:00+08:00");
+  const store = new ScheduledTaskStore();
+  const service = new ChatScheduleService(store, console, {
+    now: () => new Date(now)
+  });
+
+  const created = service.createTask({
+    chatId: "oc_group_1",
+    cron: "0 9 * * *",
+    prompt: "生成日报"
+  });
+  assert.equal(created.ok, true);
+
+  now = new Date("2026-04-04T09:05:00+08:00");
+  const updated = service.updateTask({
+    chatId: "oc_group_1",
+    taskId: "1",
+    cron: "30 18 * * 1-5",
+    prompt: "生成晚报"
+  });
+
+  assert.equal(updated.ok, true);
+  assert.equal(updated.ok && updated.task.taskId, "1");
+  assert.equal(updated.ok && updated.task.cron, "30 18 * * 1-5");
+  assert.equal(updated.ok && updated.task.prompt, "生成晚报");
+  assert.equal(updated.ok && updated.task.nextRunAt, "2026-04-06T10:30:00.000Z");
+});
+
 test("ChatScheduleService retries busy tasks and pauses invalid tasks", async () => {
   let now = new Date("2026-04-04T09:00:00+08:00");
   const store = new ScheduledTaskStore();

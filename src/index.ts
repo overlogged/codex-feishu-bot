@@ -5,6 +5,7 @@ async function main(): Promise<void> {
   const env = readEnv();
   const runtime = buildAppRuntime(env);
   const { app } = runtime;
+  let shuttingDown: Promise<never> | undefined;
 
   await app.listen({
     host: env.HOST,
@@ -13,9 +14,25 @@ async function main(): Promise<void> {
 
   await runtime.startExternalServices();
 
-  const shutdown = async (): Promise<void> => {
-    await runtime.stopExternalServices();
-    await app.close();
+  const shutdown = (): Promise<never> => {
+    if (shuttingDown) {
+      return shuttingDown;
+    }
+
+    shuttingDown = (async () => {
+      try {
+        await runtime.stopExternalServices();
+        await app.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(error);
+        process.exit(1);
+      }
+
+      return new Promise<never>(() => undefined);
+    })();
+
+    return shuttingDown;
   };
 
   process.on("SIGINT", () => {

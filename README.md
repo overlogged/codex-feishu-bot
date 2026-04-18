@@ -136,8 +136,9 @@ pnpm host:smoke
 
 如果群绑定成 `docker` 模式：
 
-- 当前只支持 `codex`
-- 实际执行仍然走同一套 `codex app-server` 协议
+- 当前支持 `codex` / `kimi`
+- `codex` 仍然走同一套 `codex app-server` 协议
+- `kimi` 直接在运行镜像里执行容器化 CLI，并使用官方 `--wire` 协议模式复用长驻会话
 - 使用仓库当前的运行镜像 `codex-feishu-bot-session:local`
 - 运行镜像默认基于 Ubuntu 24.04，并对齐宿主机的 Node 24.14.0 / Codex CLI 0.118.0，优先解决宿主机编译产物在容器里的 glibc 兼容问题
 - 把宿主机 `/home` 原样映射进容器里的 `/home`
@@ -151,6 +152,7 @@ pnpm host:smoke
 - 回到群里发 `@机器人 12`
 - 或 `@机器人 claude 12`
 - 或 `@机器人 docker 12`
+- 或 `@机器人 docker kimi 12`
 - 或自然语言，例如 `@机器人 把这个群切到 docker 模式的 12 号目录`
 
 ## 后台运行

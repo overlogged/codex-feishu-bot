@@ -42,6 +42,12 @@ export type GroupControlIntent =
       prompt: string;
     }
   | {
+      kind: "update_schedule";
+      taskId: string;
+      cron?: string;
+      prompt?: string;
+    }
+  | {
       kind: "pause_schedule" | "resume_schedule" | "delete_schedule";
       taskId: string;
     }
@@ -66,7 +72,21 @@ export interface GroupControlContext {
 }
 
 export interface GroupControlAgent {
-  interpret(message: IncomingChatMessage, context: GroupControlContext): Promise<GroupControlIntent>;
+  interpret(
+    message: IncomingChatMessage,
+    context: GroupControlContext,
+    options?: {
+      controlThreadId?: string;
+    }
+  ): Promise<{
+    intents: GroupControlIntent[];
+    threadId: string;
+  }>;
+}
+
+function isRecoverableControlThreadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no rollout found for thread id/i.test(message) || /thread\/resume/i.test(message);
 }
 
 function stripMentions(text: string): string {
@@ -128,8 +148,17 @@ function normalizeExecutionMode(value: string): ChatExecutionMode {
   throw new Error(`控制 agent 返回了不支持的执行模式：${value}`);
 }
 
-function parseIntent(raw: string): GroupControlIntent {
-  const parsed = parseJsonObject(raw);
+function optionalString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent {
   const kind = requireString(parsed, "kind");
 
   switch (kind) {
@@ -155,6 +184,20 @@ function parseIntent(raw: string): GroupControlIntent {
         cron: requireString(parsed, "cron"),
         prompt: requireString(parsed, "prompt")
       };
+    case "update_schedule": {
+      const cron = optionalString(parsed, "cron");
+      const prompt = optionalString(parsed, "prompt");
+      if (!cron && !prompt) {
+        throw new Error("控制 agent 修改定时任务时，至少要提供 cron 或 prompt。");
+      }
+
+      return {
+        kind,
+        taskId: requireString(parsed, "taskId"),
+        cron,
+        prompt
+      };
+    }
     case "pause_schedule":
     case "resume_schedule":
     case "delete_schedule":
@@ -170,6 +213,26 @@ function parseIntent(raw: string): GroupControlIntent {
     default:
       throw new Error(`控制 agent 返回了不支持的动作：${kind}`);
   }
+}
+
+function parseIntents(raw: string): GroupControlIntent[] {
+  const parsed = parseJsonObject(raw);
+  const actions = parsed.actions;
+  if (Array.isArray(actions)) {
+    if (actions.length === 0) {
+      throw new Error("控制 agent 返回的 actions 不能为空。");
+    }
+
+    return actions.map((action, index) => {
+      if (!action || typeof action !== "object" || Array.isArray(action)) {
+        throw new Error(`控制 agent 返回的第 ${index + 1} 个动作不是对象。`);
+      }
+
+      return parseIntentRecord(action as Record<string, unknown>);
+    });
+  }
+
+  return [parseIntentRecord(parsed)];
 }
 
 function renderCatalog(entries: ChatWorkspaceCatalogEntry[]): string {
@@ -202,11 +265,16 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
   return [
     "这是一个群聊配置控制面的内部解析请求。",
     "不要调用任何工具，不要修改任何文件，不要发送任何飞书消息。",
-    "只返回一个 JSON 对象，不要输出 Markdown，不要加解释。",
+    "只返回 JSON，不要输出 Markdown，不要加解释。",
     "",
     "你的职责：把群里 @机器人的配置类消息解析成结构化动作。",
-    "所有群里的 @机器人 消息都保留给配置控制面使用，不用于普通项目任务。",
+    "所有群里的 @机器人 消息都会进入这个群自己长期复用的配置线程，不用于普通项目任务。",
     "如果用户是在群里 @机器人 提项目任务或闲聊，返回 help，并明确提示“群里 @机器人 只用于配置，请直接发普通消息处理项目任务”。",
+    "",
+    "返回格式：",
+    '- 单动作时可直接返回 {"kind":"..."}',
+    '- 多动作时返回 {"actions":[{"kind":"..."}, {"kind":"..."}]}',
+    "- 如果一句话里包含多步控制，请按用户表达顺序放进 actions。",
     "",
     "可返回的 kind：",
     '- {"kind":"list_workspaces"}',
@@ -214,6 +282,7 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     '- {"kind":"bind_workspace","cli":"codex|claude|kimi","executionMode":"host|docker","code":"<目录编号>"}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
+    '- {"kind":"update_schedule","taskId":"<编号>","cron":"<可选 5段 cron>","prompt":"<可选 新任务内容>"}',
     '- {"kind":"pause_schedule","taskId":"<编号>"}',
     '- {"kind":"resume_schedule","taskId":"<编号>"}',
     '- {"kind":"delete_schedule","taskId":"<编号>"}',
@@ -224,10 +293,13 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "- schedule 只支持循环 cron，不支持一次性“明天/两个小时后”。这类需求返回 help。",
     "- 可以把自然语言时间转成 cron，例如“工作日早上 9 点” -> 0 9 * * 1-5。",
     "- 可以根据当前定时任务列表把“第一个/日报那条”解析成 taskId。",
+    "- 一句话里可以同时包含多个配置动作、多个定时任务修改，或先查看再修改，请按顺序拆成 actions。",
+    "- 用户说“改一下这个任务”“把 2 号改成工作日 9 点”这类，优先返回 update_schedule。",
+    "- 用户说“撤销/取消/删掉某个定时任务”时，可根据语义返回 pause_schedule 或 delete_schedule。",
     "- 绑定工作区时，必须从下面给出的目录编号里选 code。",
     "- 如果用户没有明确提模式，executionMode 默认返回 host。",
     "- 如果用户明确说“docker 模式 / 容器模式”，executionMode 返回 docker。",
-    "- docker 模式当前只支持 codex；如果用户说 claude/kimi + docker，返回 help 解释限制。",
+    "- docker 模式当前支持 codex / kimi；如果用户说 claude + docker，返回 help 解释限制。",
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",
     "- 如果用户说“新会话”“重开会话”，返回 new_session。",
@@ -258,7 +330,16 @@ export class CodexGroupControlAgent implements GroupControlAgent {
     private readonly logger?: LoggerLike
   ) {}
 
-  async interpret(message: IncomingChatMessage, context: GroupControlContext): Promise<GroupControlIntent> {
+  async interpret(
+    message: IncomingChatMessage,
+    context: GroupControlContext,
+    options?: {
+      controlThreadId?: string;
+    }
+  ): Promise<{
+    intents: GroupControlIntent[];
+    threadId: string;
+  }> {
     const internalMessage: IncomingChatMessage = {
       chatId: message.chatId,
       chatType: message.chatType,
@@ -274,43 +355,74 @@ export class CodexGroupControlAgent implements GroupControlAgent {
       }
     };
 
-    const threadId = `pending:group-control:${message.chatId}:${randomUUID()}`;
+    const runControlTurn = async (threadId: string) => {
+      let finalAnswer: string | undefined;
+      let lastError: string | undefined;
+      let resolvedThreadId = threadId;
 
-    let finalAnswer: string | undefined;
-    let lastError: string | undefined;
+      for await (const event of this.codexWorker.runTurn({
+        cli: "codex",
+        executionMode: "host",
+        workspaceId: this.defaultWorkspace,
+        message: internalMessage,
+        threadId: resolvedThreadId
+      })) {
+        if (event.kind === "thread_bound") {
+          resolvedThreadId = event.threadId;
+        }
 
-    for await (const event of this.codexWorker.runTurn({
-      cli: "codex",
-      executionMode: "host",
-      workspaceId: this.defaultWorkspace,
-      message: internalMessage,
-      threadId
-    })) {
-      if (event.kind === "assistant_message_completed") {
-        finalAnswer = event.text;
+        if (event.kind === "assistant_message_completed") {
+          finalAnswer = event.text;
+        }
+
+        if (event.kind === "error") {
+          lastError = event.message;
+        }
       }
 
-      if (event.kind === "error") {
-        lastError = event.message;
+      if (lastError) {
+        throw new Error(lastError);
       }
-    }
 
-    if (lastError) {
-      throw new Error(lastError);
-    }
+      if (!finalAnswer?.trim()) {
+        throw new Error("控制 agent 没有返回可见结果。");
+      }
 
-    if (!finalAnswer?.trim()) {
-      throw new Error("控制 agent 没有返回可见结果。");
-    }
+      this.logger?.info(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          finalAnswerPreview: finalAnswer.slice(0, 200)
+        },
+        "群配置控制 agent 已返回结构化结果"
+      );
+      return {
+        intents: parseIntents(finalAnswer),
+        threadId: resolvedThreadId
+      };
+    };
 
-    this.logger?.info(
-      {
-        chatId: message.chatId,
-        messageId: message.messageId,
-        finalAnswerPreview: finalAnswer.slice(0, 200)
-      },
-      "群配置控制 agent 已返回结构化结果"
-    );
-    return parseIntent(finalAnswer);
+    const initialThreadId =
+      options?.controlThreadId ?? `pending:group-control:${message.chatId}:${randomUUID()}`;
+
+    try {
+      return await runControlTurn(initialThreadId);
+    } catch (error) {
+      if (!options?.controlThreadId || !isRecoverableControlThreadError(error)) {
+        throw error;
+      }
+
+      this.logger?.warn(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          controlThreadId: options.controlThreadId,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "群配置控制 thread 恢复失败，改为新建控制 thread"
+      );
+
+      return runControlTurn(`pending:group-control:${message.chatId}:${randomUUID()}`);
+    };
   }
 }
