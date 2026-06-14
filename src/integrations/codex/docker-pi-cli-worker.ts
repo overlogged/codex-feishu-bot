@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import type { Readable, Writable } from "node:stream";
+import type { Readable } from "node:stream";
 
 import type { Env } from "../../config/env.js";
 import type { CodexTurnContext } from "./codex-worker.js";
@@ -11,10 +11,12 @@ import {
   type LoggerLike
 } from "./docker-runtime.js";
 import {
-  KimiCliWorker,
-  type KimiCliProcessHandle,
-  type KimiCliRuntime
-} from "./kimi-cli-worker.js";
+  PiCliWorker,
+  type PiCliProcessHandle,
+  type PiCliRuntime
+} from "./pi-cli-worker.js";
+
+const PI_DOCKER_ENV_PREFIXES = ["PI_"] as const;
 
 function sanitizeContainerName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
@@ -41,14 +43,14 @@ function appendExecEnvPrefixes(args: string[], prefixes: readonly string[]): voi
 }
 
 function turnPidFile(turnId: string): string {
-  return `/tmp/codex-feishu-bot-kimi-${sanitizeContainerName(turnId)}.pid`;
+  return `/tmp/codex-feishu-bot-pi-${sanitizeContainerName(turnId)}.pid`;
 }
 
 function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-export function buildDockerKimiExecArgs(
+export function buildDockerPiExecArgs(
   env: Env,
   options: {
     turnId: string;
@@ -67,14 +69,14 @@ export function buildDockerKimiExecArgs(
     'exec "$@"'
   ].join("\n");
   const dockerArgs = ["exec", "-i", "-w", options.context.workspaceId];
-  appendExecEnvPrefixes(dockerArgs, ["KIMI_", "MOONSHOT_"]);
+  appendExecEnvPrefixes(dockerArgs, PI_DOCKER_ENV_PREFIXES);
   dockerArgs.push(
     env.DOCKER_EXECUTION_CONTAINER_NAME,
     "sh",
     "-lc",
     execScript,
     "sh",
-    env.KIMI_CLI_COMMAND,
+    env.PI_CLI_COMMAND,
     ...options.args
   );
 
@@ -85,7 +87,7 @@ export function buildDockerKimiExecArgs(
 }
 
 async function terminateDockerRunProcess(
-  child: ChildProcessByStdio<Writable, Readable, Readable>
+  child: ChildProcessByStdio<null, Readable, Readable>
 ): Promise<void> {
   if (child.killed) {
     return;
@@ -115,7 +117,7 @@ async function terminateDockerRunProcess(
   });
 }
 
-class DockerKimiCliRuntime implements KimiCliRuntime {
+class DockerPiCliRuntime implements PiCliRuntime {
   private readonly docker: DockerCommandRunner;
   private preparePromise: Promise<void> | undefined;
 
@@ -131,7 +133,6 @@ class DockerKimiCliRuntime implements KimiCliRuntime {
       this.preparePromise = (async () => {
         await this.docker.ensureImage();
         await this.ensureContainerRunning();
-        await this.cleanupOrphanKimiContainers();
       })();
     }
 
@@ -142,8 +143,8 @@ class DockerKimiCliRuntime implements KimiCliRuntime {
     turnId: string;
     context: CodexTurnContext;
     args: string[];
-  }): KimiCliProcessHandle {
-    const { dockerArgs, pidFile } = buildDockerKimiExecArgs(this.env, options);
+  }): PiCliProcessHandle {
+    const { dockerArgs, pidFile } = buildDockerPiExecArgs(this.env, options);
     const invocation = resolveDockerCommandInvocation(dockerArgs);
     this.logger?.info(
       {
@@ -159,11 +160,11 @@ class DockerKimiCliRuntime implements KimiCliRuntime {
         ]),
         workspaceId: options.context.workspaceId
       },
-      "在常驻 docker 执行池中开始 Kimi Wire turn"
+      "在常驻 docker 执行池中开始 Pi CLI turn"
     );
 
     const child = spawn(invocation.command, invocation.args, {
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     let stopPromise: Promise<void> | undefined;
@@ -236,45 +237,15 @@ class DockerKimiCliRuntime implements KimiCliRuntime {
         FEISHU_DOMAIN: process.env.FEISHU_DOMAIN ?? this.env.FEISHU_DOMAIN,
         OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? ""
       },
+      passthroughEnvPrefixes: PI_DOCKER_ENV_PREFIXES,
       command: ["start-codex-app-server"]
     });
     await this.docker.run(dockerArgs);
   }
-
-  private async cleanupOrphanKimiContainers(): Promise<void> {
-    const namePrefix = `${this.env.DOCKER_EXECUTION_CONTAINER_NAME}-kimi-`;
-    const listed = await this.docker.run(
-      ["ps", "-aq", "--filter", `name=${namePrefix}`],
-      {
-        allowFailure: true,
-        timeoutMs: 2_000
-      }
-    );
-    const containerIds = listed.stdout
-      .split(/\s+/)
-      .map((value) => value.trim())
-      .filter(Boolean);
-
-    if (containerIds.length === 0) {
-      return;
-    }
-
-    this.logger?.warn(
-      {
-        containerIds,
-        namePrefix
-      },
-      "清理历史遗留的 docker Kimi Wire 临时容器"
-    );
-    await this.docker.run(["rm", "-f", ...containerIds], {
-      allowFailure: true,
-      timeoutMs: 5_000
-    });
-  }
 }
 
-export class DockerKimiCliWorker extends KimiCliWorker {
+export class DockerPiCliWorker extends PiCliWorker {
   constructor(env: Env, logger?: LoggerLike) {
-    super(env, logger, new DockerKimiCliRuntime(env, logger));
+    super(env, logger, new DockerPiCliRuntime(env, logger));
   }
 }

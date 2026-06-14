@@ -10,9 +10,11 @@ import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
 import { DockerCodexAppServerWorker } from "./integrations/codex/docker-codex-app-server-worker.js";
 import { DockerKimiCliWorker } from "./integrations/codex/docker-kimi-cli-worker.js";
+import { DockerPiCliWorker } from "./integrations/codex/docker-pi-cli-worker.js";
 import { ExecutionModeRoutedCodexWorker } from "./integrations/codex/execution-mode-routed-worker.js";
 import { KimiCliWorker } from "./integrations/codex/kimi-cli-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
+import { PiCliWorker } from "./integrations/codex/pi-cli-worker.js";
 import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
 import { FakeFeishuMessageClient } from "./integrations/feishu/fake-feishu-message-client.js";
 import { FakeFeishuWsSubscriber } from "./integrations/feishu/fake-feishu-ws-subscriber.js";
@@ -66,14 +68,16 @@ function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
       new MultiCliWorker({
         codex: new CodexAppServerWorker(env, logger),
         claude: new ClaudeCliWorker(env, logger),
-        kimi: new KimiCliWorker(env, logger)
+        kimi: new KimiCliWorker(env, logger),
+        pi: new PiCliWorker(env, logger)
       }),
       new MultiCliWorker({
         codex: new DockerCodexAppServerWorker(env, logger),
         claude: new UnsupportedCodexWorker(
-          "docker 模式当前只支持 codex / kimi。请把群绑定改回 host，或者切到 codex / kimi。"
+          "docker 模式当前只支持 codex / kimi / pi。请把群绑定改回 host，或者切到 codex / kimi / pi。"
         ),
-        kimi: new DockerKimiCliWorker(env, logger)
+        kimi: new DockerKimiCliWorker(env, logger),
+        pi: new DockerPiCliWorker(env, logger)
       }),
       logger
     );

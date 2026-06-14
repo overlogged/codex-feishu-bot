@@ -37,6 +37,61 @@ interface RuntimeStores {
   scheduledTaskStore: ScheduledTaskStore;
 }
 
+const MAX_PERSISTED_CONVERSATION_ITEMS = 5_000;
+const MAX_PERSISTED_CONTENT_CHARS = 20_000;
+const MAX_PERSISTED_OUTPUT_CHARS = 12_000;
+const MAX_PERSISTED_DETAIL_CHARS = 8_000;
+const MAX_PERSISTED_DETAILS = 20;
+const MAX_PERSISTED_FILE_PATHS = 100;
+const MAX_PERSISTED_FEISHU_MESSAGE_IDS = 50;
+
+function truncateString(value: string | undefined, maxChars: number): string | undefined {
+  if (value === undefined || value.length <= maxChars) {
+    return value;
+  }
+
+  const omitted = value.length - maxChars;
+  return `${value.slice(0, maxChars)}\n[truncated ${omitted} chars from runtime snapshot]`;
+}
+
+function truncateArray(values: string[], maxItems: number, maxChars: number): string[] {
+  return values
+    .slice(-maxItems)
+    .map((value) => truncateString(value, maxChars) ?? "");
+}
+
+function compactConversationItem(item: ConversationItem): ConversationItem {
+  return {
+    ...item,
+    title: truncateString(item.title, MAX_PERSISTED_DETAIL_CHARS),
+    content: truncateString(item.content, MAX_PERSISTED_CONTENT_CHARS),
+    command: truncateString(item.command, MAX_PERSISTED_DETAIL_CHARS),
+    output: truncateString(item.output, MAX_PERSISTED_OUTPUT_CHARS),
+    details: truncateArray(
+      Array.isArray(item.details) ? item.details : [],
+      MAX_PERSISTED_DETAILS,
+      MAX_PERSISTED_DETAIL_CHARS
+    ),
+    filePaths: Array.isArray(item.filePaths)
+      ? item.filePaths.slice(-MAX_PERSISTED_FILE_PATHS)
+      : [],
+    feishuMessageIds: Array.isArray(item.feishuMessageIds)
+      ? item.feishuMessageIds.slice(-MAX_PERSISTED_FEISHU_MESSAGE_IDS)
+      : undefined
+  };
+}
+
+function compactConversationItems(items: ConversationItem[]): {
+  items: ConversationItem[];
+  droppedItems: number;
+} {
+  const compacted = items.slice(-MAX_PERSISTED_CONVERSATION_ITEMS).map(compactConversationItem);
+  return {
+    items: compacted,
+    droppedItems: Math.max(0, items.length - compacted.length)
+  };
+}
+
 export interface InterruptedRunNotice {
   chatId: string;
   threadId: string;
@@ -198,12 +253,14 @@ export class RuntimeStatePersister {
       throw new Error("runtime stores not attached");
     }
 
+    const compactedItems = compactConversationItems(this.stores.conversationStore.list());
+
     return {
       version: 3,
       savedAt: new Date().toISOString(),
       sessions: this.stores.sessionStore.list(),
       runs: this.stores.runStore.list(),
-      items: this.stores.conversationStore.list(),
+      items: compactedItems.items,
       scheduledTasks: this.stores.scheduledTaskStore.list()
     };
   }
@@ -228,16 +285,28 @@ export class RuntimeStatePersister {
       });
     }
 
-    void writePromise.finally(() => {
-      if (this.latestWrite === writePromise) {
-        this.latestWrite = undefined;
+    void writePromise.then(
+      () => {
+        if (this.latestWrite === writePromise) {
+          this.latestWrite = undefined;
+        }
+      },
+      () => {
+        if (this.latestWrite === writePromise) {
+          this.latestWrite = undefined;
+        }
       }
-    });
+    );
 
     return writePromise;
   }
 
   private async writeSnapshot(): Promise<void> {
+    if (!this.stores) {
+      throw new Error("runtime stores not attached");
+    }
+
+    const originalItemCount = this.stores.conversationStore.list().length;
     const snapshot = this.snapshot();
     const dir = dirname(this.filePath);
     const tempFile = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
@@ -252,6 +321,7 @@ export class RuntimeStatePersister {
         sessions: snapshot.sessions.length,
         runs: snapshot.runs.length,
         items: snapshot.items.length,
+        droppedItems: Math.max(0, originalItemCount - snapshot.items.length),
         scheduledTasks: snapshot.scheduledTasks.length
       },
       "运行态快照已持久化"

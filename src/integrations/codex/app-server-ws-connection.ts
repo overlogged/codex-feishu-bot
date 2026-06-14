@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+
+import WebSocket from "ws";
+
 type JsonRpcId = number;
 
 interface LoggerLike {
@@ -39,6 +43,7 @@ interface ConnectionHandlers {
 interface ConnectionOptions extends ConnectionHandlers {
   logger?: LoggerLike;
   label?: string;
+  authTokenFile?: string;
 }
 
 function isResponse(message: unknown): message is JsonRpcResponse {
@@ -73,6 +78,14 @@ async function decodeMessageData(data: unknown): Promise<string> {
     return data;
   }
 
+  if (Buffer.isBuffer(data)) {
+    return data.toString("utf8");
+  }
+
+  if (Array.isArray(data)) {
+    return Buffer.concat(data).toString("utf8");
+  }
+
   if (data instanceof ArrayBuffer) {
     return new TextDecoder().decode(data);
   }
@@ -86,6 +99,19 @@ async function decodeMessageData(data: unknown): Promise<string> {
   }
 
   return String(data);
+}
+
+function readBearerToken(tokenFile: string | undefined): string | undefined {
+  if (!tokenFile) {
+    return undefined;
+  }
+
+  const token = readFileSync(tokenFile, "utf8").trim();
+  if (!token) {
+    throw new Error(`Codex App Server WebSocket token file is empty: ${tokenFile}`);
+  }
+
+  return token;
 }
 
 function summarizeValue(value: unknown, depth = 0): unknown {
@@ -155,14 +181,25 @@ export class AppServerWsConnection {
       },
       "正在连接 Codex App Server WebSocket"
     );
-    const socket = new WebSocket(this.url);
+    const bearerToken = readBearerToken(this.options.authTokenFile);
+    const socket = new WebSocket(
+      this.url,
+      bearerToken
+        ? {
+            headers: {
+              authorization: `Bearer ${bearerToken}`
+            }
+          }
+        : undefined
+    );
     this.socket = socket;
     this.intentionalClose = false;
 
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {
-        socket.removeEventListener("open", handleOpen);
-        socket.removeEventListener("error", handleError);
+        socket.off("open", handleOpen);
+        socket.off("error", handleError);
+        socket.off("unexpected-response", handleUnexpectedResponse);
       };
 
       const handleOpen = () => {
@@ -177,20 +214,30 @@ export class AppServerWsConnection {
         resolve();
       };
 
-      const handleError = () => {
+      const handleError = (error: Error) => {
         cleanup();
-        reject(new Error(`无法连接 Codex App Server: ${this.url}`));
+        reject(new Error(`无法连接 Codex App Server: ${this.url}: ${error.message}`));
       };
 
-      socket.addEventListener("open", handleOpen);
-      socket.addEventListener("error", handleError);
+      const handleUnexpectedResponse = (_request: unknown, response: { statusCode?: number }) => {
+        cleanup();
+        reject(
+          new Error(
+            `无法连接 Codex App Server: ${this.url}: HTTP ${response.statusCode ?? "unknown"}`
+          )
+        );
+      };
+
+      socket.once("open", handleOpen);
+      socket.once("error", handleError);
+      socket.once("unexpected-response", handleUnexpectedResponse);
     });
 
-    socket.addEventListener("message", (event) => {
-      void this.handleMessage(event.data);
+    socket.on("message", (data) => {
+      void this.handleMessage(data);
     });
 
-    socket.addEventListener("close", () => {
+    socket.on("close", () => {
       const unexpected = !this.intentionalClose;
       this.logger?.warn(
         {
@@ -245,7 +292,7 @@ export class AppServerWsConnection {
 
     this.intentionalClose = true;
     await new Promise<void>((resolve) => {
-      socket.addEventListener("close", () => resolve(), { once: true });
+      socket.once("close", () => resolve());
       socket.close();
     });
   }

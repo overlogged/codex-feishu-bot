@@ -32,6 +32,9 @@ export type GroupControlIntent =
       cli: ChatCli;
       executionMode: ChatExecutionMode;
       code: string;
+      provider?: string;
+      model?: string;
+      thinking?: string;
     }
   | {
       kind: "list_schedules";
@@ -64,6 +67,9 @@ export interface GroupControlContext {
         cli: ChatCli;
         executionMode: ChatExecutionMode;
         workspaceId: string;
+        provider?: string;
+        model?: string;
+        thinking?: string;
       }
     | {
         configured: false;
@@ -132,8 +138,18 @@ function requireString(record: Record<string, unknown>, key: string): string {
 
 function normalizeCli(value: string): ChatCli {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "codex" || normalized === "claude" || normalized === "kimi") {
-    return normalized;
+  if (
+    normalized === "codex" ||
+    normalized === "claude" ||
+    normalized === "kimi" ||
+    normalized === "pi" ||
+    normalized === "deepseek" ||
+    normalized === "ds" ||
+    normalized === "ds4"
+  ) {
+    return normalized === "deepseek" || normalized === "ds" || normalized === "ds4"
+      ? "pi"
+      : normalized;
   }
 
   throw new Error(`控制 agent 返回了不支持的 CLI：${value}`);
@@ -141,8 +157,12 @@ function normalizeCli(value: string): ChatCli {
 
 function normalizeExecutionMode(value: string): ChatExecutionMode {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "host" || normalized === "docker") {
-    return normalized;
+  if (normalized === "host") {
+    return "host";
+  }
+
+  if (normalized === "docker" || normalized === "dodocker" || normalized === "do-docker") {
+    return "docker";
   }
 
   throw new Error(`控制 agent 返回了不支持的执行模式：${value}`);
@@ -176,7 +196,10 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
         executionMode: normalizeExecutionMode(
           typeof parsed.executionMode === "string" ? parsed.executionMode : "host"
         ),
-        code: requireString(parsed, "code")
+        code: requireString(parsed, "code"),
+        provider: optionalString(parsed, "provider"),
+        model: optionalString(parsed, "model"),
+        thinking: optionalString(parsed, "thinking")
       };
     case "create_schedule":
       return {
@@ -259,7 +282,16 @@ function renderScheduledTasks(tasks: ScheduledTaskRecord[]): string {
 function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupControlContext): string {
   const strippedMessage = stripMentions(message.text);
   const currentBinding = context.currentBinding.configured
-    ? `已绑定，cli=${context.currentBinding.cli}，executionMode=${context.currentBinding.executionMode}，workspace=${context.currentBinding.workspaceId}`
+    ? [
+        `已绑定，cli=${context.currentBinding.cli}`,
+        `executionMode=${context.currentBinding.executionMode}`,
+        `workspace=${context.currentBinding.workspaceId}`,
+        context.currentBinding.model ? `model=${context.currentBinding.model}` : undefined,
+        context.currentBinding.provider ? `provider=${context.currentBinding.provider}` : undefined,
+        context.currentBinding.thinking ? `thinking=${context.currentBinding.thinking}` : undefined
+      ]
+        .filter(Boolean)
+        .join("，")
     : `未绑定。${context.currentBinding.detail}`;
 
   return [
@@ -279,7 +311,7 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "可返回的 kind：",
     '- {"kind":"list_workspaces"}',
     '- {"kind":"show_binding"}',
-    '- {"kind":"bind_workspace","cli":"codex|claude|kimi","executionMode":"host|docker","code":"<目录编号>"}',
+    '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|deepseek|ds","executionMode":"host|docker","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
     '- {"kind":"update_schedule","taskId":"<编号>","cron":"<可选 5段 cron>","prompt":"<可选 新任务内容>"}',
@@ -298,8 +330,11 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "- 用户说“撤销/取消/删掉某个定时任务”时，可根据语义返回 pause_schedule 或 delete_schedule。",
     "- 绑定工作区时，必须从下面给出的目录编号里选 code。",
     "- 如果用户没有明确提模式，executionMode 默认返回 host。",
-    "- 如果用户明确说“docker 模式 / 容器模式”，executionMode 返回 docker。",
-    "- docker 模式当前支持 codex / kimi；如果用户说 claude + docker，返回 help 解释限制。",
+    "- 如果用户明确说“docker 模式 / 容器模式 / dodocker”，executionMode 返回 docker。",
+    "- docker 模式当前支持 codex / kimi / pi；如果用户说 claude + docker，返回 help 解释限制。",
+    "- 用户说 'deepseek'、'ds'、'ds4'、'DeepSeek V4 Pro'、'DS4 Pro'、'DeepSeek V4 Flash'、'DS4 Flash' 时，cli 应该返回 pi，并在 model 里分别返回 deepseek-v4-pro 或 deepseek-v4-flash。",
+    "- 用户说 'pi'、'ds' 或 'deepseek' 但没有指定模型时，不填 model；用户明确说 V4 Pro / V4 Flash / DS4 Pro / DS4 Flash 时，必须填上对应 model。",
+    "- provider 字段只在用户明确指定时才填，否则省略（让运行时按环境变量或默认规则处理）。",
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",
     "- 如果用户说“新会话”“重开会话”，返回 new_session。",
@@ -327,7 +362,8 @@ export class CodexGroupControlAgent implements GroupControlAgent {
   constructor(
     private readonly codexWorker: CodexWorker,
     private readonly defaultWorkspace: string,
-    private readonly logger?: LoggerLike
+    private readonly logger?: LoggerLike,
+    private readonly cli: ChatCli = "kimi"
   ) {}
 
   async interpret(
@@ -361,7 +397,7 @@ export class CodexGroupControlAgent implements GroupControlAgent {
       let resolvedThreadId = threadId;
 
       for await (const event of this.codexWorker.runTurn({
-        cli: "codex",
+        cli: this.cli,
         executionMode: "host",
         workspaceId: this.defaultWorkspace,
         message: internalMessage,

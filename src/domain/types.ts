@@ -1,4 +1,4 @@
-export const CHAT_CLI_VALUES = ["codex", "claude", "kimi"] as const;
+export const CHAT_CLI_VALUES = ["codex", "claude", "kimi", "pi"] as const;
 export type ChatCli = (typeof CHAT_CLI_VALUES)[number];
 export const CHAT_EXECUTION_MODE_VALUES = ["host", "docker"] as const;
 export type ChatExecutionMode = (typeof CHAT_EXECUTION_MODE_VALUES)[number];
@@ -23,6 +23,9 @@ export interface ChatSession {
   cli: ChatCli;
   workspaceId: string;
   executionMode?: ChatExecutionMode;
+  provider?: string;
+  model?: string;
+  thinking?: string;
   controlThreadId?: string;
   controlReplyToMessageId?: string;
   chatType?: string;

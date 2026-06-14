@@ -28,12 +28,17 @@ export class DockerCodexAppServerWorker implements CodexWorker {
     this.delegateEnv = {
       ...env,
       CODEX_APP_SERVER_MANAGED: false,
-      CODEX_APP_SERVER_LISTEN_URL: env.DOCKER_EXECUTION_LISTEN_URL
+      CODEX_APP_SERVER_LISTEN_URL: env.DOCKER_EXECUTION_LISTEN_URL,
+      CODEX_APP_SERVER_WS_TOKEN_FILE: env.DOCKER_EXECUTION_WS_TOKEN_FILE
     };
     this.docker = new DockerCommandRunner(env, logger);
   }
 
   async close(): Promise<void> {
+    if (this.env.DOCKER_EXECUTION_EXTERNAL) {
+      return;
+    }
+
     await this.stopContainer().catch((error) => {
       this.logger?.warn(
         {
@@ -115,8 +120,20 @@ export class DockerCodexAppServerWorker implements CodexWorker {
         return;
       }
 
+      if (this.env.DOCKER_EXECUTION_EXTERNAL) {
+        throw new Error(
+          `docker 执行池容器 ${this.env.DOCKER_EXECUTION_CONTAINER_NAME} 已存在但没有运行，请启动 codex-feishu-bot-quantdev-docker.service。`
+        );
+      }
+
       await this.docker.run(["start", this.env.DOCKER_EXECUTION_CONTAINER_NAME]);
       return;
+    }
+
+    if (this.env.DOCKER_EXECUTION_EXTERNAL) {
+      throw new Error(
+        `docker 执行池容器 ${this.env.DOCKER_EXECUTION_CONTAINER_NAME} 不存在，请启动 codex-feishu-bot-quantdev-docker.service。`
+      );
     }
 
     const hostPort = parseDockerHostPort(this.env.DOCKER_EXECUTION_LISTEN_URL);
@@ -126,6 +143,7 @@ export class DockerCodexAppServerWorker implements CodexWorker {
       publishPorts: [`127.0.0.1:${hostPort}:4500`],
       extraEnv: {
         CODEX_APP_SERVER_LISTEN_URL: "ws://0.0.0.0:4500",
+        CODEX_APP_SERVER_WS_TOKEN_FILE: this.env.DOCKER_EXECUTION_WS_TOKEN_FILE,
         FEISHU_APP_ID: process.env.FEISHU_APP_ID ?? "",
         FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET ?? "",
         FEISHU_DOMAIN: process.env.FEISHU_DOMAIN ?? this.env.FEISHU_DOMAIN,

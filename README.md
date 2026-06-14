@@ -136,11 +136,13 @@ pnpm host:smoke
 
 如果群绑定成 `docker` 模式：
 
-- 当前支持 `codex` / `kimi`
+- 当前支持 `codex` / `kimi` / `pi`
+- `claude` 目前只支持 `host` 裸金属模式
 - `codex` 仍然走同一套 `codex app-server` 协议
 - `kimi` 直接在运行镜像里执行容器化 CLI，并使用官方 `--wire` 协议模式复用长驻会话
+- `pi` 直接在运行镜像里执行容器化 CLI，默认走 OpenRouter 的 DeepSeek V4 Pro，消息或绑定里指定 `DS4 Flash` / `V4 Flash` 时会切到 DeepSeek V4 Flash
 - 使用仓库当前的运行镜像 `codex-feishu-bot-session:local`
-- 运行镜像默认基于 Ubuntu 24.04，并对齐宿主机的 Node 24.14.0 / Codex CLI 0.118.0，优先解决宿主机编译产物在容器里的 glibc 兼容问题
+- 运行镜像默认基于 Ubuntu 24.04，并对齐宿主机的 Node 24.14.0 / Codex CLI 0.133.0，优先解决宿主机编译产物在容器里的 glibc 兼容问题
 - 把宿主机 `/home` 原样映射进容器里的 `/home`
 - CPU 限制为本机可用核心数的一半
 - 内存限制为 `100g`
@@ -153,6 +155,9 @@ pnpm host:smoke
 - 或 `@机器人 claude 12`
 - 或 `@机器人 docker 12`
 - 或 `@机器人 docker kimi 12`
+- 或 `@机器人 docker pi 12`
+- 或 `@机器人 docker pi ds4 flash 12`
+- 或 `@机器人 pi 12`
 - 或自然语言，例如 `@机器人 把这个群切到 docker 模式的 12 号目录`
 
 ## 后台运行
@@ -220,9 +225,33 @@ pnpm bootstrap:env
 - `DOCKER_EXECUTION_CONTAINER_NAME`
 - `DOCKER_EXECUTION_LISTEN_URL`
 - `DOCKER_EXECUTION_MEMORY`
+- `DOCKER_EXECUTION_GPU`
 - `DOCKER_EXECUTION_MOUNT_ROOT`
+- `DOCKER_EXECUTION_MOUNTS`
 
 推荐优先让 Codex 检查宿主机是否已经存在 `~/.codex/auth.json`。如果存在，就把 `CODEX_HOME_SOURCE` 改成这个宿主机绝对路径；只有在本机没有 Codex 登录态时，才退回 `OPENAI_API_KEY`。
+
+## QuantDev 保护 Docker
+
+quantdev 专用 session 镜像使用 `quantdev-runtime` 构建目标。它按以前的 Docker 模式全量映射 `/home`，因此 `QuantDev`、git/Codex/Kimi/slock 鉴权状态和其他用户目录都可见；同时用子挂载把 `/home/overlogged/QuantFS/common_data` 和 `/home/overlogged/QuantFS/prod` 覆盖成只读。`QuantFS/dev` 和其他未特殊保护目录仍随 `/home` 映射保持可写。
+
+这个容器是常驻执行池，不是随用随起的临时容器。`codex + docker` 连接同一个容器里的 `codex app-server`，`kimi + docker` 也通过 `docker exec` 进入同一个容器执行，`slock` daemon 由 entrypoint 在这个容器里后台运行。默认 CPU 和内存限制都按宿主机一半计算。
+
+`DOCKER_EXECUTION_GPU=auto` 会自动给 WSL GPU 环境挂载 `/dev/dxg` 和 `/usr/lib/wsl`，让容器内能找到 `nvidia-smi`、`libcuda.so` 和 NVML；普通 NVIDIA Container Toolkit 环境则使用 `--gpus all`。如果机器不应该暴露 GPU，可以设为 `off`。
+
+常用命令：
+
+```bash
+pnpm quantdev:docker:build
+pnpm quantdev:service:install:user
+systemctl --user enable --now codex-feishu-bot-quantdev-docker.service
+```
+
+`SLOCK_API_KEY` 放在 `.env.real`，不要写进可提交文件。容器启动时 entrypoint 会后台运行：
+
+```bash
+npx -y @slock-ai/daemon@latest --server-url "$SLOCK_SERVER_URL" --api-key "$SLOCK_API_KEY"
+```
 
 `.env.real.example` 里对每一项都有注释。
 

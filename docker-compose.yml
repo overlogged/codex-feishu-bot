@@ -5,8 +5,11 @@ services:
       dockerfile: Dockerfile
       args:
         HOST_RUNTIME_IMAGE: ${HOST_RUNTIME_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/ubuntu:24.04}
+        BUILD_NODE_IMAGE: ${BUILD_NODE_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-bookworm-slim}
+        PNPM_VERSION: ${PNPM_VERSION:-10.33.0}
         NODE_VERSION: ${NODE_VERSION:-24.14.0}
-        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.118.0}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.133.0}
+        PI_CLI_VERSION: ${PI_CLI_VERSION:-0.73.1}
     restart: unless-stopped
     init: true
     environment:
@@ -27,6 +30,10 @@ services:
       CODEX_APP_SERVER_SANDBOX: danger-full-access
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CODEX_HOME_DIR: /root/.codex
+      PI_CLI_COMMAND: ${PI_CLI_COMMAND:-pi}
+      PI_CLI_PROVIDER: ${PI_CLI_PROVIDER:-openrouter}
+      PI_CLI_MODEL: ${PI_CLI_MODEL:-deepseek-v4-pro}
+      PI_CLI_THINKING: ${PI_CLI_THINKING:-xhigh}
       FEISHU_PROVIDER: sdk
       FEISHU_TRANSPORT: websocket
       FEISHU_DOMAIN: ${FEISHU_DOMAIN:-feishu}

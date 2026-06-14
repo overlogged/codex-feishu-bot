@@ -11,6 +11,9 @@ export interface CodexTurnContext {
   cli: ChatCli;
   workspaceId: string;
   executionMode?: ChatExecutionMode;
+  provider?: string;
+  model?: string;
+  thinking?: string;
   message: IncomingChatMessage;
 }
 

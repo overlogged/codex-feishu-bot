@@ -70,7 +70,10 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
         kind: "bind_workspace",
         cli: "claude",
         executionMode: "host",
-        code: "2"
+        code: "2",
+        provider: undefined,
+        model: undefined,
+        thinking: undefined
       }
     ],
     threadId: "thread_control_1"
@@ -249,4 +252,247 @@ test("CodexGroupControlAgent rejects missing final answers", async () => {
     }),
     /没有返回可见结果/
   );
+});
+
+test("CodexGroupControlAgent interprets pi bind intent", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"bind_workspace","cli":"pi","executionMode":"host","code":"2"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 把这个群绑定到 pi 的 Quant"
+    }),
+    {
+      catalog: [
+        {
+          code: "1",
+          workspace: "Downloads",
+          workspaceId: "/home/overlogged/Downloads"
+        },
+        {
+          code: "2",
+          workspace: "Quant",
+          workspaceId: "/home/overlogged/Quant"
+        }
+      ],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "这个群还没有绑定工作区。"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "bind_workspace",
+      cli: "pi",
+      executionMode: "host",
+      code: "2",
+      provider: undefined,
+      model: undefined,
+      thinking: undefined
+    }
+  ]);
+  assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
+});
+
+test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"bind_workspace","cli":"deepseek","executionMode":"host","code":"2","model":"deepseek-v4-pro"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 把这个群绑定到 DeepSeek V4 Pro 的 Quant"
+    }),
+    {
+      catalog: [
+        {
+          code: "1",
+          workspace: "Downloads",
+          workspaceId: "/home/overlogged/Downloads"
+        },
+        {
+          code: "2",
+          workspace: "Quant",
+          workspaceId: "/home/overlogged/Quant"
+        }
+      ],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "这个群还没有绑定工作区。"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "bind_workspace",
+      cli: "pi",
+      executionMode: "host",
+      code: "2",
+      provider: undefined,
+      model: "deepseek-v4-pro",
+      thinking: undefined
+    }
+  ]);
+});
+
+test("CodexGroupControlAgent interprets docker DS4 Flash bind intent", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"bind_workspace","cli":"deepseek","executionMode":"docker","code":"2","model":"deepseek-v4-flash"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 把这个群绑定到 docker 的 DS4 Flash Quant"
+    }),
+    {
+      catalog: [
+        {
+          code: "1",
+          workspace: "Downloads",
+          workspaceId: "/home/overlogged/Downloads"
+        },
+        {
+          code: "2",
+          workspace: "Quant",
+          workspaceId: "/home/overlogged/Quant"
+        }
+      ],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "这个群还没有绑定工作区。"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "bind_workspace",
+      cli: "pi",
+      executionMode: "docker",
+      code: "2",
+      provider: undefined,
+      model: "deepseek-v4-flash",
+      thinking: undefined
+    }
+  ]);
+});
+
+test("CodexGroupControlAgent normalizes ds dodocker bind intent", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"bind_workspace","cli":"ds","executionMode":"dodocker","code":"2"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 ds dodocker Quant"
+    }),
+    {
+      catalog: [
+        {
+          code: "1",
+          workspace: "Downloads",
+          workspaceId: "/home/overlogged/Downloads"
+        },
+        {
+          code: "2",
+          workspace: "Quant",
+          workspaceId: "/home/overlogged/Quant"
+        }
+      ],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "这个群还没有绑定工作区。"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "bind_workspace",
+      cli: "pi",
+      executionMode: "docker",
+      code: "2",
+      provider: undefined,
+      model: undefined,
+      thinking: undefined
+    }
+  ]);
+});
+
+test("CodexGroupControlAgent passes custom cli to runTurn", async () => {
+  let capturedCli: string | undefined;
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      capturedCli = context.cli;
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"show_binding"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged", undefined, "claude");
+  const result = await agent.interpret(createMessage(), {
+    catalog: [],
+    scheduledTasks: [],
+    currentBinding: {
+      configured: false,
+      detail: "未绑定"
+    }
+  });
+
+  assert.equal(capturedCli, "claude");
+  assert.deepEqual(result.intents, [{ kind: "show_binding" }]);
 });

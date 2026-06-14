@@ -40,6 +40,14 @@ const envBoolean = (defaultValue: boolean) =>
     return value;
   }, z.boolean());
 
+const optionalNonEmptyString = z.preprocess((value) => {
+  if (typeof value === "string" && value.trim() === "") {
+    return undefined;
+  }
+
+  return value;
+}, z.string().optional());
+
 const envSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -47,6 +55,7 @@ const envSchema = z.object({
   CODEX_APP_SERVER_COMMAND: z.string().default("codex"),
   CODEX_APP_SERVER_ARGS: z.string().default("app-server"),
   CODEX_APP_SERVER_LISTEN_URL: z.string().url().default("ws://127.0.0.1:4500"),
+  CODEX_APP_SERVER_WS_TOKEN_FILE: optionalNonEmptyString,
   CODEX_APP_SERVER_MANAGED: envBoolean(false),
   CODEX_APP_SERVER_MODEL: z.string().default("gpt-5.4"),
   CODEX_APP_SERVER_APPROVAL_POLICY: z
@@ -62,11 +71,22 @@ const envSchema = z.object({
   FEISHU_BRIDGE_SCRIPT: z.string().default("scripts/feishu-bridge.mjs"),
   CLAUDE_CLI_COMMAND: z.string().default("cl"),
   KIMI_CLI_COMMAND: z.string().default("kimi"),
+  PI_CLI_COMMAND: z.string().default("pi"),
+  PI_CLI_PROVIDER: optionalNonEmptyString.default("openrouter"),
+  PI_CLI_MODEL: optionalNonEmptyString.default("deepseek-v4-pro"),
+  PI_CLI_THINKING: optionalNonEmptyString.default("xhigh"),
   DOCKER_EXECUTION_IMAGE: z.string().default("codex-feishu-bot-session:local"),
   DOCKER_EXECUTION_CONTAINER_NAME: z.string().default("codex-feishu-bot-session-pool"),
   DOCKER_EXECUTION_LISTEN_URL: z.string().url().default("ws://127.0.0.1:4510"),
-  DOCKER_EXECUTION_MEMORY: z.string().default("100g"),
+  DOCKER_EXECUTION_MEMORY: z.string().default("half"),
+  DOCKER_EXECUTION_BUILD_TARGET: z.string().default("runtime"),
+  DOCKER_EXECUTION_EXTERNAL: envBoolean(false),
+  DOCKER_EXECUTION_GPU: z.string().default("auto"),
   DOCKER_EXECUTION_MOUNT_ROOT: z.string().default("/home"),
+  DOCKER_EXECUTION_MOUNTS: z.string().default(""),
+  DOCKER_EXECUTION_WS_TOKEN_FILE: z
+    .string()
+    .default(".codex-feishu-bot/docker-codex-app-server.ws-token"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
   FEISHU_PROVIDER: z.enum(["sdk", "fake"]).default("sdk"),
   FEISHU_TRANSPORT: z.enum(["websocket", "webhook", "disabled"]).default("websocket"),
@@ -88,13 +108,22 @@ export function readEnv(): Env {
   const parsed = envSchema.parse(process.env);
   const defaultWorkspace = resolveDir(process.cwd(), parsed.DEFAULT_WORKSPACE);
 
+  const dockerExecutionWsTokenFile = resolveDir(
+    defaultWorkspace,
+    parsed.DOCKER_EXECUTION_WS_TOKEN_FILE
+  );
+
   return {
     ...parsed,
     DEFAULT_WORKSPACE: defaultWorkspace,
+    CODEX_APP_SERVER_WS_TOKEN_FILE: parsed.CODEX_APP_SERVER_WS_TOKEN_FILE
+      ? resolveDir(process.cwd(), parsed.CODEX_APP_SERVER_WS_TOKEN_FILE)
+      : undefined,
     CHAT_WORKSPACE_BINDINGS_FILE: resolveDir(defaultWorkspace, parsed.CHAT_WORKSPACE_BINDINGS_FILE),
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
     RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE),
     FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT),
-    DOCKER_EXECUTION_MOUNT_ROOT: resolveDir(process.cwd(), parsed.DOCKER_EXECUTION_MOUNT_ROOT)
+    DOCKER_EXECUTION_MOUNT_ROOT: resolveDir(process.cwd(), parsed.DOCKER_EXECUTION_MOUNT_ROOT),
+    DOCKER_EXECUTION_WS_TOKEN_FILE: dockerExecutionWsTokenFile
   };
 }

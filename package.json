@@ -31,6 +31,9 @@
     "docker:restart": "./scripts/docker.sh restart app",
     "docker:exec:app": "./scripts/docker.sh exec app sh",
     "docker:smoke": "./scripts/docker-smoke.sh",
+    "quantdev:docker:build": "./scripts/build-quantdev-image.sh",
+    "quantdev:docker:up": "./scripts/start-quantdev-docker.sh",
+    "quantdev:service:install:user": "./scripts/install-quantdev-docker-service.sh",
     "docker:fake:up": "docker compose -f docker-compose.fake.yml up --build -d",
     "docker:fake:down": "docker compose -f docker-compose.fake.yml down -v",
     "docker:fake:logs": "docker compose -f docker-compose.fake.yml logs -f app fake-feishu"

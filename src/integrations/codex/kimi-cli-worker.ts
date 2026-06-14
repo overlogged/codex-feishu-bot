@@ -1131,14 +1131,30 @@ class KimiWireSession {
         );
       }
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (this.isClosedOrUnwritable()) {
+        throw new Error(errorMessage || this.stderr.trim() || "Kimi Wire initialize 异常。");
+      }
       this.logger?.warn(
         {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
           threadId: this.threadIdValue ?? this.initialThreadKey
         },
         "Kimi Wire initialize 异常，回退为无握手模式"
       );
     }
+  }
+
+  private isClosedOrUnwritable(): boolean {
+    const stdin = this.child.stdin;
+    return (
+      this.child.exitCode !== null ||
+      this.child.signalCode !== null ||
+      this.child.killed ||
+      !stdin ||
+      stdin.destroyed ||
+      !stdin.writable
+    );
   }
 
   private handleStdoutChunk(chunk: string): void {

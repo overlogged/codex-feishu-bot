@@ -193,6 +193,14 @@ export class CodexAppServerWorker implements CodexWorker {
       "--listen",
       this.env.CODEX_APP_SERVER_LISTEN_URL
     ];
+    if (this.env.CODEX_APP_SERVER_WS_TOKEN_FILE) {
+      args.push(
+        "--ws-auth",
+        "capability-token",
+        "--ws-token-file",
+        this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
+      );
+    }
 
     this.logger?.info(
       {
@@ -250,7 +258,8 @@ export class CodexAppServerWorker implements CodexWorker {
 
     const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
       logger: this.logger,
-      label: "ensure-thread"
+      label: "ensure-thread",
+      authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
     });
     await connection.connect();
 
@@ -335,7 +344,8 @@ export class CodexAppServerWorker implements CodexWorker {
 
     const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
       logger: this.logger,
-      label: "steer-turn"
+      label: "steer-turn",
+      authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
     });
     await connection.connect();
 
@@ -416,7 +426,8 @@ export class CodexAppServerWorker implements CodexWorker {
 
     const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
       logger: this.logger,
-      label: "interrupt-turn"
+      label: "interrupt-turn",
+      authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
     });
     await connection.connect();
 
@@ -640,6 +651,7 @@ export class CodexAppServerWorker implements CodexWorker {
       new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
         logger: this.logger,
         label: "run-turn",
+        authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE,
         onUnexpectedClose: (error) => {
           void attemptRecovery(error);
         },
@@ -1242,7 +1254,8 @@ export class CodexAppServerWorker implements CodexWorker {
     while (Date.now() - startedAt < timeoutMs) {
       const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
         logger: this.logger,
-        label: "wait-for-server"
+        label: "wait-for-server",
+        authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
       });
       try {
         await connection.connect();

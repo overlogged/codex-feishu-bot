@@ -23,6 +23,9 @@ type ChatWorkspaceBindingRecord = Record<
       workspace?: string;
       cli?: string;
       executionMode?: string;
+      provider?: string;
+      model?: string;
+      thinking?: string;
     }
 >;
 
@@ -38,6 +41,9 @@ interface ParsedChatBinding {
   rawCli?: string;
   executionMode?: ChatExecutionMode;
   rawExecutionMode?: string;
+  provider?: string;
+  model?: string;
+  thinking?: string;
 }
 
 export type ChatWorkspaceResolution =
@@ -46,6 +52,9 @@ export type ChatWorkspaceResolution =
       workspaceId: string;
       cli: ChatCli;
       executionMode: ChatExecutionMode;
+      provider?: string;
+      model?: string;
+      thinking?: string;
     }
   | {
       ok: false;
@@ -72,12 +81,18 @@ export interface ChatWorkspaceResolver {
     cli: ChatCli;
     executionMode: ChatExecutionMode;
     code: string;
+    provider?: string;
+    model?: string;
+    thinking?: string;
   }): Promise<
     | {
         ok: true;
         entry: ChatWorkspaceCatalogEntry;
         cli: ChatCli;
         executionMode: ChatExecutionMode;
+        provider?: string;
+        model?: string;
+        thinking?: string;
         configFilePath: string;
       }
     | {
@@ -112,6 +127,9 @@ function parseBindingWorkspace(
         workspace?: string;
         cli?: string;
         executionMode?: string;
+        provider?: string;
+        model?: string;
+        thinking?: string;
       }
     | undefined
 ): ParsedChatBinding {
@@ -119,7 +137,7 @@ function parseBindingWorkspace(
     const trimmed = value.trim();
     return {
       workspace: trimmed || undefined,
-      cli: "codex",
+      cli: "kimi",
       executionMode: "host"
     };
   }
@@ -136,7 +154,7 @@ function parseBindingWorkspace(
     typeof value.cli === "string" && SUPPORTED_CHAT_CLIS.has(value.cli as ChatCli)
       ? (value.cli as ChatCli)
       : value.cli === undefined
-        ? "codex"
+        ? "kimi"
         : undefined;
   const executionMode =
     typeof value.executionMode === "string" &&
@@ -145,6 +163,12 @@ function parseBindingWorkspace(
       : value.executionMode === undefined
         ? "host"
         : undefined;
+  const provider =
+    typeof value.provider === "string" && value.provider.trim() ? value.provider.trim() : undefined;
+  const model =
+    typeof value.model === "string" && value.model.trim() ? value.model.trim() : undefined;
+  const thinking =
+    typeof value.thinking === "string" && value.thinking.trim() ? value.thinking.trim() : undefined;
 
   return {
     workspace,
@@ -152,7 +176,10 @@ function parseBindingWorkspace(
     rawCli: typeof value.cli === "string" ? value.cli.trim() || undefined : undefined,
     executionMode,
     rawExecutionMode:
-      typeof value.executionMode === "string" ? value.executionMode.trim() || undefined : undefined
+      typeof value.executionMode === "string" ? value.executionMode.trim() || undefined : undefined,
+    provider,
+    model,
+    thinking
   };
 }
 
@@ -177,7 +204,7 @@ function normalizeBindings(bindings: ChatWorkspaceBindingRecord): {
         chatId,
         {
           workspace: value,
-          cli: "codex"
+          cli: "kimi"
         }
       ] as const;
     }
@@ -196,7 +223,7 @@ function normalizeBindings(bindings: ChatWorkspaceBindingRecord): {
         chatId,
         {
           workspace: value.workspace.trim(),
-          cli: value.cli ?? "codex",
+          cli: value.cli ?? "kimi",
           executionMode: value.executionMode ?? "host"
         }
       ] as const;
@@ -232,7 +259,10 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         ok: true,
         workspaceId: session?.workspaceId ?? this.defaultWorkspace,
         cli: "codex",
-        executionMode: "host"
+        executionMode: "host",
+        provider: undefined,
+        model: undefined,
+        thinking: undefined
       };
     }
 
@@ -315,8 +345,8 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
         chatId: message.chatId,
         configuredWorkspace: configuredBinding.workspace,
         detail: [
-          `这个群当前配置的是 ${configuredBinding.cli} + docker，但 docker 模式暂时只支持 codex / kimi。`,
-          `请把 ${this.configFilePath} 里的 cli 改成 codex 或 kimi，或者把 executionMode 改回 host。`
+          `这个群当前配置的是 ${configuredBinding.cli} + docker，但 docker 模式暂时只支持 codex / kimi / pi。`,
+          `请把 ${this.configFilePath} 里的 cli 改成 codex、kimi 或 pi，或者把 executionMode 改回 host。`
         ].join("\n")
       };
     }
@@ -379,7 +409,10 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ok: true,
       workspaceId: resolvedWorkspace,
       cli: configuredBinding.cli,
-      executionMode: configuredBinding.executionMode
+      executionMode: configuredBinding.executionMode,
+      provider: configuredBinding.provider,
+      model: configuredBinding.model,
+      thinking: configuredBinding.thinking
     };
   }
 
@@ -402,17 +435,25 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     return entries.find((entry) => entry.code === trimmedCode);
   }
 
-  async bindGroupWorkspace(input: {
-    chatId: string;
-    cli: ChatCli;
-    executionMode: ChatExecutionMode;
-    code: string;
-  }): Promise<
+  async bindGroupWorkspace(
+    input: {
+      chatId: string;
+      cli: ChatCli;
+      executionMode: ChatExecutionMode;
+      code: string;
+      provider?: string;
+      model?: string;
+      thinking?: string;
+    }
+  ): Promise<
     | {
         ok: true;
         entry: ChatWorkspaceCatalogEntry;
         cli: ChatCli;
         executionMode: ChatExecutionMode;
+        provider?: string;
+        model?: string;
+        thinking?: string;
         configFilePath: string;
       }
     | {
@@ -426,7 +467,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       return {
         ok: false,
         reason: "unsupported_execution_mode",
-        detail: "docker 模式当前只支持 codex / kimi。claude 仍然只能使用 host 裸金属模式。",
+        detail: "docker 模式当前只支持 codex / kimi / pi。claude 仍然只能使用 host 裸金属模式。",
         configFilePath: this.configFilePath
       };
     }
@@ -475,7 +516,10 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       [input.chatId]: {
         workspace: entry.workspace,
         cli: input.cli,
-        executionMode: input.executionMode
+        executionMode: input.executionMode,
+        ...(input.provider ? { provider: input.provider } : {}),
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.thinking ? { thinking: input.thinking } : {})
       }
     };
 
@@ -493,6 +537,9 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       entry,
       cli: input.cli,
       executionMode: input.executionMode,
+      provider: input.provider,
+      model: input.model,
+      thinking: input.thinking,
       configFilePath: this.configFilePath
     };
   }

@@ -123,6 +123,76 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
   assert.match(raw, /"scheduledTasks"/);
 });
 
+test("RuntimeStatePersister compacts large conversation snapshots", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "codex-feishu-state-"));
+  const filePath = join(tempDir, "runtime-state.json");
+
+  const persister = new RuntimeStatePersister(filePath);
+  const persist = () => persister.scheduleSave();
+  const sessionStore = new SessionStore(persist);
+  const runStore = new RunStore(persist);
+  const conversationStore = new ConversationStore(persist);
+  const scheduledTaskStore = new ScheduledTaskStore(persist);
+
+  persister.attach({
+    sessionStore,
+    runStore,
+    conversationStore,
+    scheduledTaskStore
+  });
+
+  runStore.save({
+    runId: "run_1",
+    chatId: "oc_chat_1",
+    threadId: "thread_1",
+    sourceMessageId: "om_1",
+    status: "completed",
+    startedAt: "2026-03-09T00:00:00.000Z",
+    updatedAt: "2026-03-09T00:00:01.000Z"
+  });
+
+  const hugeContent = "x".repeat(25_000);
+  const hugeOutput = "y".repeat(15_000);
+  for (let index = 0; index < 5_005; index += 1) {
+    conversationStore.save({
+      runId: "run_1",
+      chatId: "oc_chat_1",
+      sourceMessageId: "om_1",
+      itemId: `item_${index}`,
+      order: index,
+      kind: "tool_card",
+      source: "tool",
+      phase: "completed",
+      content: index === 5_004 ? hugeContent : `content_${index}`,
+      output: index === 5_004 ? hugeOutput : `output_${index}`,
+      details: Array.from({ length: 25 }, (_, detailIndex) => `detail_${index}_${detailIndex}`),
+      filePaths: Array.from({ length: 110 }, (_, pathIndex) => `/tmp/${index}_${pathIndex}`),
+      createdAt: "2026-03-09T00:00:00.000Z",
+      updatedAt: "2026-03-09T00:00:01.000Z"
+    });
+  }
+
+  await persister.flush();
+
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as {
+    items: Array<{
+      itemId: string;
+      content?: string;
+      output?: string;
+      details: string[];
+      filePaths: string[];
+    }>;
+  };
+  assert.equal(parsed.items.length, 5_000);
+  assert.equal(parsed.items[0]?.itemId, "item_5");
+  const lastItem = parsed.items.at(-1);
+  assert.ok(lastItem);
+  assert.match(lastItem.content ?? "", /truncated 5000 chars/);
+  assert.match(lastItem.output ?? "", /truncated 3000 chars/);
+  assert.equal(lastItem.details.length, 20);
+  assert.equal(lastItem.filePaths.length, 100);
+});
+
 test("RuntimeStatePersister serializes overlapping writes that target the same snapshot", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "codex-feishu-state-"));
   const filePath = join(tempDir, "runtime-state.json");

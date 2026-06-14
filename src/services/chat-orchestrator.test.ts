@@ -1005,7 +1005,7 @@ test("ChatOrchestrator lists workspace catalog in direct chats without starting 
   assert.equal(runStore.list().length, 0);
   assert.equal(sentTexts.length, 1);
   assert.match(sentTexts[0] ?? "", /1\. Quant\/project-a/);
-  assert.match(sentTexts[0] ?? "", /@机器人 把这个群绑定到 codex 的 2 号目录/);
+  assert.match(sentTexts[0] ?? "", /@机器人 把这个群绑定到 kimi 的 2 号目录/);
 });
 
 test("ChatOrchestrator binds group workspace when mentioned with a numeric code", async () => {
@@ -1109,7 +1109,7 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi";
+        cli: "codex" | "claude" | "kimi" | "pi";
         code: string;
       }
     | undefined;
@@ -1183,7 +1183,10 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
     chatId: "oc_group_1",
     cli: "claude",
     executionMode: "host",
-    code: "12"
+    code: "12",
+    provider: undefined,
+    model: undefined,
+    thinking: undefined
   });
   assert.match(sentTexts[0] ?? "", /Claude CLI/);
 });
@@ -1197,7 +1200,7 @@ test("ChatOrchestrator binds group workspace with an explicit docker selector", 
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi";
+        cli: "codex" | "claude" | "kimi" | "pi";
         executionMode: "host" | "docker";
         code: string;
       }
@@ -1272,10 +1275,112 @@ test("ChatOrchestrator binds group workspace with an explicit docker selector", 
     chatId: "oc_group_1",
     cli: "codex",
     executionMode: "docker",
-    code: "12"
+    code: "12",
+    provider: undefined,
+    model: undefined,
+    thinking: undefined
   });
   assert.match(sentTexts[0] ?? "", /Docker 模式的 Codex CLI/);
   assert.match(sentTexts[0] ?? "", /docker \/ codex/);
+});
+
+test("ChatOrchestrator binds group workspace with docker pi DS4 Flash selector", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+  let bindInput:
+    | {
+        chatId: string;
+        cli: "codex" | "claude" | "kimi" | "pi";
+        executionMode: "host" | "docker";
+        code: string;
+        provider?: string;
+        model?: string;
+        thinking?: string;
+      }
+    | undefined;
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_group_bound_docker_pi";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    {
+      async ensureThread() {
+        return "thread_should_not_start";
+      },
+      async *runTurn(): AsyncGenerator<CodexEvent> {}
+    },
+    createWorkspaceResolver({
+      async bindGroupWorkspace(input) {
+        bindInput = input;
+        return {
+          ok: true,
+          cli: "pi",
+          executionMode: "docker",
+          model: "deepseek-v4-flash",
+          entry: {
+            code: "12",
+            workspace: "Quant/project-a",
+            workspaceId: "/home/overlogged/Quant/project-a"
+          },
+          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
+        };
+      }
+    }),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret() {
+        return createControlResult({
+          kind: "bind_workspace",
+          cli: "pi",
+          executionMode: "docker",
+          code: "12",
+          model: "deepseek-v4-flash"
+        });
+      }
+    })
+  );
+
+  orchestrator.enqueue(
+    createControlSession({
+      messageId: "om_group_bind_docker_pi_1",
+      text: "@托帕 docker pi ds4 flash 12"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(bindInput, {
+    chatId: "oc_group_1",
+    cli: "pi",
+    executionMode: "docker",
+    code: "12",
+    provider: undefined,
+    model: "deepseek-v4-flash",
+    thinking: undefined
+  });
+  assert.match(sentTexts[0] ?? "", /Docker 模式的 Pi CLI/);
+  assert.match(sentTexts[0] ?? "", /deepseek-v4-flash/);
+  assert.match(sentTexts[0] ?? "", /docker \/ pi/);
 });
 
 test("ChatOrchestrator creates a group scheduled task without starting a run", async () => {

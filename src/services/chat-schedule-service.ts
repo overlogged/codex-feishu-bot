@@ -548,9 +548,14 @@ export class ChatScheduleService {
         return;
       }
 
-      const nextRunAt = getNextCronOccurrence(currentTask.cron, this.now());
+      const latestTask = this.store.get(currentTask.chatId, currentTask.taskId);
+      if (!latestTask || latestTask.status !== "enabled") {
+        return;
+      }
+
+      const nextRunAt = getNextCronOccurrence(latestTask.cron, this.now());
       this.store.save({
-        ...currentTask,
+        ...latestTask,
         updatedAt: this.now().toISOString(),
         lastTriggeredAt: this.now().toISOString(),
         nextRunAt: nextRunAt?.toISOString(),

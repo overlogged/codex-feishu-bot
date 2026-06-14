@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { availableParallelism } from "node:os";
+import { existsSync } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
+import { resolve } from "node:path";
 
 import type { Env } from "../../config/env.js";
 
@@ -25,12 +27,35 @@ interface DockerCommandInvocation {
   args: string[];
 }
 
+interface DockerBindMount {
+  source: string;
+  target: string;
+  mode: "ro" | "rw";
+}
+
+interface DockerGpuConfig {
+  enabled: boolean;
+  dockerArgs: string[];
+  ldLibraryPath?: string;
+  pathPrefix?: string;
+}
+
 function formatCpuLimit(): string {
   const halfCpus = Math.max(1, availableParallelism() / 2);
   const rounded = Math.round(halfCpus * 100) / 100;
   return Number.isInteger(rounded)
     ? String(rounded)
     : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatMemoryLimit(configured: string): string {
+  const normalized = configured.trim().toLowerCase();
+  if (["auto", "half", "50%"].includes(normalized)) {
+    const halfMemoryMiB = Math.max(512, Math.floor(totalmem() / 2 / 1024 / 1024));
+    return `${halfMemoryMiB}m`;
+  }
+
+  return configured;
 }
 
 export function shellEscapeArg(part: string): string {
@@ -195,17 +220,144 @@ function appendProcessEnvPrefixes(args: string[], prefixes: readonly string[]): 
   }
 }
 
+function parseDockerExecutionMounts(rawMounts: string | undefined): DockerBindMount[] {
+  if (!rawMounts?.trim()) {
+    return [];
+  }
+
+  return rawMounts
+    .split(/[\n,]/)
+    .map((rawMount) => rawMount.trim())
+    .filter(Boolean)
+    .map((rawMount) => {
+      const parts = rawMount.split(":");
+      if (parts.length < 2 || parts.length > 3) {
+        throw new Error(
+          `DOCKER_EXECUTION_MOUNTS 条目格式错误：${rawMount}，应为 host_path:container_path[:ro|rw]`
+        );
+      }
+
+      const sourceRaw = parts[0];
+      const targetRaw = parts[1];
+      const modeRaw = parts[2] ?? "rw";
+      if (!sourceRaw || !targetRaw) {
+        throw new Error(
+          `DOCKER_EXECUTION_MOUNTS 条目格式错误：${rawMount}，应为 host_path:container_path[:ro|rw]`
+        );
+      }
+
+      const source = sourceRaw.startsWith("/") ? sourceRaw : resolve(process.cwd(), sourceRaw);
+      const target = targetRaw;
+      const mode = modeRaw === "ro" ? "ro" : modeRaw === "rw" ? "rw" : undefined;
+
+      if (!source || !target.startsWith("/") || !mode) {
+        throw new Error(
+          `DOCKER_EXECUTION_MOUNTS 条目格式错误：${rawMount}，应为 host_path:container_path[:ro|rw]`
+        );
+      }
+
+      return {
+        source,
+        target,
+        mode
+      };
+    });
+}
+
+function normalizeDockerGpuMode(configured: string | undefined): string {
+  return configured?.trim().toLowerCase() || "auto";
+}
+
+function dockerGpuDisabled(mode: string): boolean {
+  return ["", "0", "false", "no", "off", "none", "disabled"].includes(mode);
+}
+
+function hostHasWslGpu(): boolean {
+  return (
+    existsSync("/dev/dxg") &&
+    existsSync("/usr/lib/wsl") &&
+    existsSync("/usr/lib/wsl/lib/nvidia-smi")
+  );
+}
+
+function dockerHasNvidiaRuntime(): boolean {
+  const result = spawnSync("docker", ["info", "--format", "{{json .Runtimes}}"], {
+    encoding: "utf8"
+  });
+  return result.status === 0 && result.stdout.includes('"nvidia"');
+}
+
+function resolveDockerGpuConfig(env: Env): DockerGpuConfig {
+  const mode = normalizeDockerGpuMode(env.DOCKER_EXECUTION_GPU);
+
+  if (dockerGpuDisabled(mode)) {
+    return {
+      enabled: false,
+      dockerArgs: []
+    };
+  }
+
+  const hasWslGpu = hostHasWslGpu();
+  if (mode === "wsl" || (mode === "auto" && hasWslGpu)) {
+    if (!hasWslGpu) {
+      throw new Error("请求启用 WSL GPU，但缺少 /dev/dxg 或 /usr/lib/wsl/lib/nvidia-smi。");
+    }
+
+    return {
+      enabled: true,
+      dockerArgs: ["--device", "/dev/dxg", "-v", "/usr/lib/wsl:/usr/lib/wsl:ro"],
+      ldLibraryPath: "/usr/lib/wsl/lib",
+      pathPrefix: "/usr/lib/wsl/lib"
+    };
+  }
+
+  if (
+    ["nvidia", "all", "cuda"].includes(mode) ||
+    (mode === "auto" && dockerHasNvidiaRuntime())
+  ) {
+    return {
+      enabled: true,
+      dockerArgs: ["--gpus", "all"]
+    };
+  }
+
+  if (mode !== "auto") {
+    throw new Error("请求启用 GPU，但当前 Docker 未检测到可用的 WSL GPU 或 nvidia runtime。");
+  }
+
+  return {
+    enabled: false,
+    dockerArgs: []
+  };
+}
+
 function resolveDockerHome(): string {
   return process.env.HOME ?? "/home/overlogged";
 }
 
-function resolveDockerPath(home: string): string {
+function resolveDockerPath(home: string, pathPrefix?: string): string {
   const currentPath =
     process.env.PATH?.trim() || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
   const localBin = `${home}/.local/bin`;
-  return currentPath === localBin || currentPath.startsWith(`${localBin}:`)
+  const prefixes = [pathPrefix, localBin].filter((prefix): prefix is string => Boolean(prefix));
+  return prefixes.reduceRight((path, prefix) => {
+    return path === prefix || path.startsWith(`${prefix}:`) ? path : `${prefix}:${path}`;
+  }, currentPath);
+}
+
+function resolveDockerLdLibraryPath(ldLibraryPath: string | undefined): string | undefined {
+  if (!ldLibraryPath) {
+    return undefined;
+  }
+
+  const currentPath = process.env.LD_LIBRARY_PATH?.trim();
+  if (!currentPath) {
+    return ldLibraryPath;
+  }
+
+  return currentPath === ldLibraryPath || currentPath.startsWith(`${ldLibraryPath}:`)
     ? currentPath
-    : `${localBin}:${currentPath}`;
+    : `${ldLibraryPath}:${currentPath}`;
 }
 
 export function buildDockerExecutionRunArgs(
@@ -223,6 +375,7 @@ export function buildDockerExecutionRunArgs(
   }
 ): string[] {
   const home = resolveDockerHome();
+  const gpu = resolveDockerGpuConfig(env);
   const args = ["run"];
 
   if (options.detach) {
@@ -240,7 +393,7 @@ export function buildDockerExecutionRunArgs(
     args.push("--name", options.containerName);
   }
   args.push("--cpus", formatCpuLimit());
-  args.push("--memory", env.DOCKER_EXECUTION_MEMORY);
+  args.push("--memory", formatMemoryLimit(env.DOCKER_EXECUTION_MEMORY));
 
   for (const port of options.publishPorts ?? []) {
     args.push("-p", port);
@@ -252,16 +405,37 @@ export function buildDockerExecutionRunArgs(
 
   args.push("-v", "/etc/passwd:/etc/passwd:ro");
   args.push("-v", "/etc/group:/etc/group:ro");
-  args.push(
-    "-v",
-    `${env.DOCKER_EXECUTION_MOUNT_ROOT}:${env.DOCKER_EXECUTION_MOUNT_ROOT}`
-  );
+  args.push(...gpu.dockerArgs);
+  const explicitMounts = parseDockerExecutionMounts(env.DOCKER_EXECUTION_MOUNTS);
+  if (explicitMounts.length > 0) {
+    for (const mount of explicitMounts) {
+      args.push("-v", `${mount.source}:${mount.target}:${mount.mode}`);
+    }
+  } else {
+    args.push(
+      "-v",
+      `${env.DOCKER_EXECUTION_MOUNT_ROOT}:${env.DOCKER_EXECUTION_MOUNT_ROOT}`
+    );
+  }
 
   pushDockerEnv(args, "HOME", home);
   pushDockerEnv(args, "CODEX_HOME_DIR", `${home}/.codex`);
-  pushDockerEnv(args, "PATH", resolveDockerPath(home));
+  pushDockerEnv(args, "PATH", resolveDockerPath(home, gpu.pathPrefix));
+  pushDockerEnv(args, "LD_LIBRARY_PATH", resolveDockerLdLibraryPath(gpu.ldLibraryPath));
+  if (gpu.enabled) {
+    pushDockerEnv(args, "NVIDIA_VISIBLE_DEVICES", "all");
+    pushDockerEnv(args, "NVIDIA_DRIVER_CAPABILITIES", "compute,utility");
+  }
 
-  appendProcessEnvKeys(args, ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"]);
+  appendProcessEnvKeys(args, [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "SLOCK_API_KEY",
+    "SLOCK_SERVER_URL",
+    "SLOCK_DAEMON_ENABLED"
+  ]);
   appendProcessEnvPrefixes(args, options.passthroughEnvPrefixes ?? []);
 
   if (process.env.SSH_AUTH_SOCK) {
@@ -386,7 +560,7 @@ export class DockerCommandRunner {
     await this.run([
       "build",
       "--target",
-      "runtime",
+      this.env.DOCKER_EXECUTION_BUILD_TARGET,
       "-t",
       this.env.DOCKER_EXECUTION_IMAGE,
       process.cwd()

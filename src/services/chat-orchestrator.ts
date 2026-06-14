@@ -57,6 +57,15 @@ type ScheduleCommand =
       detail: string;
     };
 
+type ChatRouting = {
+  workspaceId: string;
+  cli: ChatCli;
+  executionMode: ChatExecutionMode;
+  provider?: string;
+  model?: string;
+  thinking?: string;
+};
+
 function stripMentions(text: string): string {
   return text.replace(/@\S+/g, " ").trim();
 }
@@ -71,6 +80,8 @@ function renderCliLabel(cli: ChatCli): string {
       return "Claude";
     case "kimi":
       return "Kimi";
+    case "pi":
+      return "Pi";
     case "codex":
     default:
       return "Codex";
@@ -83,41 +94,80 @@ function renderExecutionModeLabel(executionMode: ChatExecutionMode): string {
 
 function extractGroupBindingCommand(
   message: IncomingChatMessage
-): { code: string; cli: ChatCli; executionMode: ChatExecutionMode } | undefined {
+): {
+  code: string;
+  cli: ChatCli;
+  executionMode: ChatExecutionMode;
+  provider?: string;
+  model?: string;
+  thinking?: string;
+} | undefined {
   if (message.chatType !== "group" || !message.mentionsBot) {
     return undefined;
   }
 
   const strippedText = stripMentions(message.text);
+  const normalizedText = strippedText.toLowerCase();
   const parts = strippedText.split(/\s+/).filter(Boolean);
   const code = parts.find((part) => /^\d+$/.test(part));
   if (!code) {
     return undefined;
   }
 
-  const cli = parts
-    .map((part) => part.toLowerCase())
-    .find((part): part is ChatCli => part === "codex" || part === "claude" || part === "kimi");
-  const executionMode = parts
-    .map((part) => part.toLowerCase())
-    .find((part): part is ChatExecutionMode => part === "host" || part === "docker");
+  const lowerParts = parts.map((part) => part.toLowerCase());
+  const cliCandidate = lowerParts.find((part) =>
+    ["codex", "claude", "kimi", "pi", "deepseek", "ds", "ds4"].includes(part)
+  );
+  const executionModeCandidate = lowerParts.find((part) =>
+    ["host", "docker", "dodocker", "do-docker"].includes(part)
+  );
+  const executionMode: ChatExecutionMode | undefined =
+    executionModeCandidate === "host"
+      ? "host"
+      : executionModeCandidate
+        ? "docker"
+        : undefined;
+
+  const cli: ChatCli =
+    cliCandidate === "deepseek" ||
+    cliCandidate === "ds" ||
+    cliCandidate === "ds4" ||
+    cliCandidate === "pi"
+      ? "pi"
+      : cliCandidate === "claude"
+        ? "claude"
+        : cliCandidate === "codex"
+          ? "codex"
+          : "kimi";
+
+  const model: string | undefined =
+    normalizedText.includes("ds4 flash") || normalizedText.includes("v4 flash")
+    ? "deepseek-v4-flash"
+    : normalizedText.includes("ds4 pro") ||
+        normalizedText.includes("v4 pro") ||
+        normalizedText.includes("deepseek") ||
+        normalizedText.includes("ds4") ||
+        lowerParts.includes("ds")
+      ? "deepseek-v4-pro"
+      : undefined;
 
   if (parts.length === 1 && code === parts[0]) {
     return {
       code,
-      cli: "codex",
+      cli: "kimi",
       executionMode: "host"
     };
   }
 
-  if (parts.length > 3) {
+  if (parts.length > 5) {
     return undefined;
   }
 
   return {
     code,
-    cli: cli ?? "codex",
-    executionMode: executionMode ?? "host"
+    cli,
+    executionMode: executionMode ?? "host",
+    model
   };
 }
 
@@ -229,9 +279,10 @@ function renderControlHelp(defaultWorkspace: string): string {
     "2. 群里发 @机器人 12",
     "3. 群里发 @机器人 claude 12",
     "4. 群里发 @机器人 docker 12",
-    "5. 群里发 @机器人 docker kimi 12",
-    "6. 群里发 @机器人 新会话",
-    "7. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
+    "5. 群里发 @机器人 docker codex 12",
+    "6. 群里发 @机器人 docker pi ds4 flash 12",
+    "7. 群里发 @机器人 新会话",
+    "8. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
     "",
     "也支持自然语言，比如“把这个群切到 docker 的 codex 12 号目录”“看看这个群现在绑到哪”。",
     "如果一句话里有多个配置动作，也会按顺序执行，比如“先暂停 1，再把 2 改成工作日 9 点发日报”。",
@@ -253,11 +304,17 @@ function renderWorkspaceCatalogMessage(
         `可绑定的工作区编号如下，根目录是 ${defaultWorkspace}：`,
         ...entries.map((entry) => `${entry.code}. ${entry.workspace}`),
         "",
-        "支持的 CLI：codex / claude / kimi",
+        "支持的 CLI：codex / claude / kimi / pi",
         "你可以直接说：",
-        "@机器人 把这个群绑定到 codex 的 2 号目录",
+        "@机器人 把这个群绑定到 kimi 的 2 号目录",
         "@机器人 把这个群切到 claude 的 Quant",
-        "@机器人 把这个群切到 docker 的 kimi 2 号目录"
+        "@机器人 把这个群切到 docker 的 codex 2 号目录",
+        "@机器人 把这个群切到 docker 的 pi ds4 flash 2 号目录",
+        "@机器人 pi 2 号目录",
+        "@机器人 DS4 Pro 2 号目录",
+        "@机器人 DS4 Flash 2 号目录",
+        "@机器人 DeepSeek V4 Pro 2 号目录",
+        "@机器人 DeepSeek V4 Flash 2 号目录"
       ].join("\n");
 }
 
@@ -399,7 +456,7 @@ function buildControlSessionPatch(
   return {
     chatId: message.chatId,
     threadId: existingSession?.threadId ?? `pending:group-session:${message.chatId}:unconfigured`,
-    cli: existingSession?.cli ?? "codex",
+    cli: existingSession?.cli ?? "kimi",
     workspaceId: existingSession?.workspaceId ?? defaultWorkspace,
     executionMode: normalizeExecutionMode(existingSession?.executionMode),
     ...existingSession,
@@ -587,17 +644,16 @@ export class ChatOrchestrator {
 
   private async handleMessage(
     message: IncomingChatMessage,
-    routing?: {
-      workspaceId: string;
-      cli: ChatCli;
-      executionMode: ChatExecutionMode;
-    }
+    routing?: ChatRouting
   ): Promise<void> {
     const existingSession = this.sessionStore.get(message.chatId);
     const resolvedWorkspaceId = routing?.workspaceId ?? existingSession?.workspaceId ?? this.defaultWorkspace;
-    const resolvedCli = routing?.cli ?? existingSession?.cli ?? "codex";
+    const resolvedCli = routing?.cli ?? existingSession?.cli ?? "kimi";
     const resolvedExecutionMode =
       routing?.executionMode ?? normalizeExecutionMode(existingSession?.executionMode);
+    const resolvedProvider = routing?.provider ?? existingSession?.provider;
+    const resolvedModel = routing?.model ?? existingSession?.model;
+    const resolvedThinking = routing?.thinking ?? existingSession?.thinking;
     const reusableSession =
       existingSession?.workspaceId === resolvedWorkspaceId &&
       existingSession.cli === resolvedCli &&
@@ -613,6 +669,9 @@ export class ChatOrchestrator {
       cli: resolvedCli,
       workspaceId: resolvedWorkspaceId,
       executionMode: resolvedExecutionMode,
+      provider: resolvedProvider,
+      model: resolvedModel,
+      thinking: resolvedThinking,
       ...buildSessionMetadataPatch(message, reusableSession ?? existingSession, observedAt),
       activeRunId: reusableSession?.activeRunId,
       activeTurnId: reusableSession?.activeTurnId,
@@ -634,6 +693,9 @@ export class ChatOrchestrator {
             cli: resolvedCli,
             workspaceId: resolvedWorkspaceId,
             executionMode: resolvedExecutionMode,
+            provider: resolvedProvider,
+            model: resolvedModel,
+            thinking: resolvedThinking,
             message
           })
         : initialThreadId;
@@ -646,7 +708,10 @@ export class ChatOrchestrator {
           threadId,
           cli: resolvedCli,
           workspaceId: resolvedWorkspaceId,
-          executionMode: resolvedExecutionMode
+          executionMode: resolvedExecutionMode,
+          provider: resolvedProvider,
+          model: resolvedModel,
+          thinking: resolvedThinking
         });
       }
 
@@ -655,6 +720,9 @@ export class ChatOrchestrator {
         cli: resolvedCli,
         workspaceId: resolvedWorkspaceId,
         executionMode: resolvedExecutionMode,
+        provider: resolvedProvider,
+        model: resolvedModel,
+        thinking: resolvedThinking,
         message,
         threadId
       })) {
@@ -668,7 +736,10 @@ export class ChatOrchestrator {
           threadId: result.run.threadId,
           cli: resolvedCli,
           workspaceId: resolvedWorkspaceId,
-          executionMode: resolvedExecutionMode
+          executionMode: resolvedExecutionMode,
+          provider: resolvedProvider,
+          model: resolvedModel,
+          thinking: resolvedThinking
         });
 
         for (const item of result.items) {
@@ -754,6 +825,9 @@ export class ChatOrchestrator {
         cli: messageSession.cli,
         workspaceId,
         executionMode,
+        provider: messageSession.provider,
+        model: messageSession.model,
+        thinking: messageSession.thinking,
         message,
         threadId: messageSession.threadId,
         turnId: messageSession.activeTurnId
@@ -780,11 +854,7 @@ export class ChatOrchestrator {
   private async dispatchActiveOrNew(
     initialSession: ReturnType<SessionStore["get"]>,
     message: IncomingChatMessage,
-    routing: {
-      workspaceId: string;
-      cli: ChatCli;
-      executionMode: ChatExecutionMode;
-    }
+    routing: ChatRouting
   ): Promise<void> {
     let session = initialSession;
 
@@ -808,11 +878,7 @@ export class ChatOrchestrator {
   private async interruptActiveRunForLatestMessage(
     existingSession: ChatSession,
     message: IncomingChatMessage,
-    routing: {
-      workspaceId: string;
-      cli: ChatCli;
-      executionMode: ChatExecutionMode;
-    }
+    routing: ChatRouting
   ): Promise<void> {
     const activeRunId = existingSession.activeRunId;
     if (!activeRunId || !this.codexWorker.interruptTurn) {
@@ -837,6 +903,9 @@ export class ChatOrchestrator {
       cli: existingSession.cli,
       workspaceId: existingSession.workspaceId,
       executionMode: normalizeExecutionMode(existingSession.executionMode),
+      provider: existingSession.provider,
+      model: existingSession.model,
+      thinking: existingSession.thinking,
       message,
       threadId: existingSession.threadId,
       turnId,
@@ -888,6 +957,9 @@ export class ChatOrchestrator {
         cli: workspaceResolution.cli,
         workspaceId: workspaceResolution.workspaceId,
         executionMode: workspaceResolution.executionMode,
+        provider: workspaceResolution.provider,
+        model: workspaceResolution.model,
+        thinking: workspaceResolution.thinking,
         message
       }) &&
       existingSession.workspaceId === workspaceResolution.workspaceId &&
@@ -897,7 +969,10 @@ export class ChatOrchestrator {
       await this.dispatchActiveOrNew(existingSession, message, {
         cli: workspaceResolution.cli,
         workspaceId: workspaceResolution.workspaceId,
-        executionMode: workspaceResolution.executionMode
+        executionMode: workspaceResolution.executionMode,
+        provider: workspaceResolution.provider,
+        model: workspaceResolution.model,
+        thinking: workspaceResolution.thinking
       });
       return {
         outcome: "triggered"
@@ -946,7 +1021,10 @@ export class ChatOrchestrator {
       chatId: message.chatId,
       cli: bindingCommand.cli,
       executionMode: bindingCommand.executionMode,
-      code: bindingCommand.code
+      code: bindingCommand.code,
+      provider: bindingCommand.provider,
+      model: bindingCommand.model,
+      thinking: bindingCommand.thinking
     });
     if (!result.ok) {
       await this.sendTextNotice(message.chatId, result.detail, {
@@ -956,10 +1034,11 @@ export class ChatOrchestrator {
       return true;
     }
 
+    const modelSuffix = result.model ? ` / ${result.model}` : "";
     await this.sendTextNotice(
       message.chatId,
       [
-        `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}`,
+        `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}${modelSuffix}`,
         `后续这个群里的任务都会通过 ${result.executionMode} / ${result.cli} 从 ${result.entry.workspaceId} 启动。`
       ].join("\n"),
       {
@@ -992,7 +1071,10 @@ export class ChatOrchestrator {
                 configured: true,
                 cli: currentBindingResolution.cli,
                 executionMode: currentBindingResolution.executionMode,
-                workspaceId: currentBindingResolution.workspaceId
+                workspaceId: currentBindingResolution.workspaceId,
+                provider: currentBindingResolution.provider,
+                model: currentBindingResolution.model,
+                thinking: currentBindingResolution.thinking
               }
             : {
                 configured: false,
@@ -1086,13 +1168,16 @@ export class ChatOrchestrator {
           chatId: message.chatId,
           cli: intent.cli,
           executionMode: intent.executionMode,
-          code: intent.code
+          code: intent.code,
+          provider: intent.provider,
+          model: intent.model,
+          thinking: intent.thinking
         });
         await this.sendTextNotice(
           message.chatId,
           result.ok
             ? [
-                `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}`,
+                `已将这个群绑定到 ${renderExecutionModeLabel(result.executionMode)} 模式的 ${renderCliLabel(result.cli)} CLI 工作区 ${result.entry.code}: ${result.entry.workspace}${result.model ? ` / ${result.model}` : ""}`,
                 `后续普通群消息会通过 ${result.executionMode} / ${result.cli} 从 ${result.entry.workspaceId} 启动。`,
                 "群里 @机器人的消息会继续进入这个群单独复用的配置线程。"
               ].join("\n")
@@ -1542,6 +1627,9 @@ export class ChatOrchestrator {
     cli: ChatCli;
     workspaceId: string;
     executionMode: ChatExecutionMode;
+    provider?: string;
+    model?: string;
+    thinking?: string;
     message: IncomingChatMessage;
   }): boolean {
     return (
@@ -1550,6 +1638,9 @@ export class ChatOrchestrator {
         cli: context.cli,
         workspaceId: context.workspaceId,
         executionMode: context.executionMode,
+        provider: context.provider,
+        model: context.model,
+        thinking: context.thinking,
         message: context.message
       }) ?? Boolean(this.codexWorker.steerTurn)
     );

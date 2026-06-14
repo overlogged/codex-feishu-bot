@@ -28,5 +28,25 @@ if [ -f "${ENV_FILE}" ]; then
 fi
 
 LISTEN_URL="${CODEX_APP_SERVER_LISTEN_URL:-ws://127.0.0.1:4500}"
+WS_TOKEN_FILE="${CODEX_APP_SERVER_WS_TOKEN_FILE:-}"
+
+if [ -n "${WS_TOKEN_FILE}" ]; then
+  mkdir -p "$(dirname "${WS_TOKEN_FILE}")"
+  if [ ! -s "${WS_TOKEN_FILE}" ]; then
+    umask 077
+    if command -v openssl >/dev/null 2>&1; then
+      openssl rand -base64 32 | tr -d '\n' >"${WS_TOKEN_FILE}"
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' >"${WS_TOKEN_FILE}"
+    else
+      node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))' >"${WS_TOKEN_FILE}"
+    fi
+  fi
+  chmod 600 "${WS_TOKEN_FILE}" 2>/dev/null || true
+  exec codex app-server \
+    --listen "${LISTEN_URL}" \
+    --ws-auth capability-token \
+    --ws-token-file "${WS_TOKEN_FILE}"
+fi
 
 exec codex app-server --listen "${LISTEN_URL}"
