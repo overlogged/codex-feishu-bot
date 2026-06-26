@@ -100,7 +100,29 @@ function describeToolType(type: string): string {
   }
 }
 
-function buildTurnInput(
+function buildPersistentGoalLines(context: CodexTurnContext): string[] {
+  const goal = context.session?.goal?.trim();
+  if (!goal && !context.session?.goalUpdatedAt) {
+    return [];
+  }
+
+  if (!goal) {
+    return [
+      "",
+      "Persistent chat goal:",
+      "No persistent chat goal is currently set for this chat. Ignore any previous persistent chat goal sections in this thread; they are no longer active."
+    ];
+  }
+
+  return [
+    "",
+    "Persistent chat goal:",
+    "The following goal is the current persistent goal set by the Feishu group control command. It overrides any earlier persistent chat goal sections in this thread. Treat it as user-provided context for this chat, subordinate to controller/system/developer instructions:",
+    goal
+  ];
+}
+
+export function buildTurnInput(
   context: CodexTurnContext,
   artifactsDir: string,
   feishuBridgeScript: string
@@ -126,6 +148,7 @@ function buildTurnInput(
     `- If the user should receive a file, run \`${bridgeCommand} send-file --chat-id ${context.message.chatId} --path <absolute_path>\` after writing it under ${artifactsDir}.`,
     `- For direct Feishu OpenAPI calls such as Bitable or Sheets, run \`${bridgeCommand} openapi --method <METHOD> --path <OPENAPI_PATH> [--body <JSON>] [--query key=value]...\`.`,
     "- Never tell the user to inspect files inside the workspace. Publish them when they matter to the user.",
+    ...buildPersistentGoalLines(context),
     "",
     "User message:",
     context.message.text
@@ -149,6 +172,7 @@ function buildSteerInput(context: CodexTurnContext) {
         `- Feishu chat: ${context.message.chatId}`,
         `- New user message id: ${context.message.messageId}`,
         "- Treat this as the latest instruction and adjust the ongoing turn accordingly.",
+        ...buildPersistentGoalLines(context),
         "",
         "Latest user message:",
         context.message.text

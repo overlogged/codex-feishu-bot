@@ -19,7 +19,10 @@ import {
   type GroupControlAgent,
   type GroupControlIntent
 } from "./group-control-agent.js";
-import type { ChatWorkspaceResolver } from "./chat-workspace-resolver.js";
+import type {
+  ChatWorkspaceResolution,
+  ChatWorkspaceResolver
+} from "./chat-workspace-resolver.js";
 import { ConversationDeliveryService } from "./conversation-delivery-service.js";
 import { MessageProjector } from "./message-projector.js";
 
@@ -154,7 +157,7 @@ function extractGroupBindingCommand(
   if (parts.length === 1 && code === parts[0]) {
     return {
       code,
-      cli: "kimi",
+      cli: "codex",
       executionMode: "host"
     };
   }
@@ -282,7 +285,9 @@ function renderControlHelp(defaultWorkspace: string): string {
     "5. 群里发 @机器人 docker codex 12",
     "6. 群里发 @机器人 docker pi ds4 flash 12",
     "7. 群里发 @机器人 新会话",
-    "8. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
+    "8. 群里发 @机器人 设置 goal 为 每次先检查测试再改代码",
+    "9. 群里发 @机器人 清除 goal",
+    "10. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
     "",
     "也支持自然语言，比如“把这个群切到 docker 的 codex 12 号目录”“看看这个群现在绑到哪”。",
     "如果一句话里有多个配置动作，也会按顺序执行，比如“先暂停 1，再把 2 改成工作日 9 点发日报”。",
@@ -306,7 +311,7 @@ function renderWorkspaceCatalogMessage(
         "",
         "支持的 CLI：codex / claude / kimi / pi",
         "你可以直接说：",
-        "@机器人 把这个群绑定到 kimi 的 2 号目录",
+        "@机器人 把这个群绑定到 codex 的 2 号目录",
         "@机器人 把这个群切到 claude 的 Quant",
         "@机器人 把这个群切到 docker 的 codex 2 号目录",
         "@机器人 把这个群切到 docker 的 pi ds4 flash 2 号目录",
@@ -449,14 +454,16 @@ function buildSessionMetadataPatch(
 function buildControlSessionPatch(
   message: IncomingChatMessage,
   existingSession: ChatSession | undefined,
-  patch: Pick<ChatSession, "controlThreadId" | "controlReplyToMessageId">,
+  patch: Partial<
+    Pick<ChatSession, "controlThreadId" | "controlReplyToMessageId" | "goal" | "goalUpdatedAt">
+  >,
   defaultWorkspace: string,
   observedAt = new Date().toISOString()
 ): ChatSession {
   return {
     chatId: message.chatId,
     threadId: existingSession?.threadId ?? `pending:group-session:${message.chatId}:unconfigured`,
-    cli: existingSession?.cli ?? "kimi",
+    cli: existingSession?.cli ?? "codex",
     workspaceId: existingSession?.workspaceId ?? defaultWorkspace,
     executionMode: normalizeExecutionMode(existingSession?.executionMode),
     ...existingSession,
@@ -495,6 +502,22 @@ function renderScheduleList(tasks: ScheduledTaskRecord[]): string {
     "",
     renderScheduleHelp()
   ].join("\n\n");
+}
+
+function renderGoalEffect(binding: ChatWorkspaceResolution): string {
+  if (!binding.ok) {
+    return "这个 goal 会先保存下来；绑定 Codex 或 Pi 工作区后生效。";
+  }
+
+  if (binding.cli === "codex") {
+    return "后续 Codex 任务会带上这个 goal。";
+  }
+
+  if (binding.cli === "pi") {
+    return "后续 Pi 任务也会带上这个 goal。";
+  }
+
+  return `当前群绑定的是 ${renderCliLabel(binding.cli)}，goal 已保存，但不会影响 ${renderCliLabel(binding.cli)}；切到 Codex 或 Pi 后生效。`;
 }
 
 function isNewSessionCommand(message: IncomingChatMessage): boolean {
@@ -654,6 +677,8 @@ export class ChatOrchestrator {
     const resolvedProvider = routing?.provider ?? existingSession?.provider;
     const resolvedModel = routing?.model ?? existingSession?.model;
     const resolvedThinking = routing?.thinking ?? existingSession?.thinking;
+    const preservedGoal = existingSession?.goal;
+    const preservedGoalUpdatedAt = existingSession?.goalUpdatedAt;
     const reusableSession =
       existingSession?.workspaceId === resolvedWorkspaceId &&
       existingSession.cli === resolvedCli &&
@@ -672,6 +697,10 @@ export class ChatOrchestrator {
       provider: resolvedProvider,
       model: resolvedModel,
       thinking: resolvedThinking,
+      goal: preservedGoal,
+      goalUpdatedAt: preservedGoalUpdatedAt,
+      controlThreadId: existingSession?.controlThreadId,
+      controlReplyToMessageId: existingSession?.controlReplyToMessageId,
       ...buildSessionMetadataPatch(message, reusableSession ?? existingSession, observedAt),
       activeRunId: reusableSession?.activeRunId,
       activeTurnId: reusableSession?.activeTurnId,
@@ -1066,6 +1095,7 @@ export class ChatOrchestrator {
         {
           catalog,
           scheduledTasks: this.scheduleService.listByChat(message.chatId),
+          goal: existingSession?.goal,
           currentBinding: currentBindingResolution.ok
             ? {
                 configured: true,
@@ -1153,9 +1183,13 @@ export class ChatOrchestrator {
                 "这个群当前已经绑定工作区。",
                 `CLI：${currentBindingResolution.cli}`,
                 `模式：${currentBindingResolution.executionMode}`,
-                `工作区：${currentBindingResolution.workspaceId}`
+                `工作区：${currentBindingResolution.workspaceId}`,
+                `Goal：${this.sessionStore.get(message.chatId)?.goal ?? "未设置"}`
               ].join("\n")
-            : currentBindingResolution.detail,
+            : [
+                currentBindingResolution.detail,
+                `Goal：${this.sessionStore.get(message.chatId)?.goal ?? "未设置"}`
+              ].join("\n"),
           {
             messageId: message.messageId,
             context: "发送当前绑定状态失败",
@@ -1257,6 +1291,12 @@ export class ChatOrchestrator {
       case "new_session":
         await this.handleNewSessionCommand(message, replyMetadata);
         return;
+      case "set_goal":
+        await this.handleSetGoalCommand(message, intent.goal, currentBindingResolution, replyMetadata);
+        return;
+      case "clear_goal":
+        await this.handleClearGoalCommand(message, currentBindingResolution, replyMetadata);
+        return;
       case "help":
       default:
         await this.sendTextNotice(
@@ -1269,6 +1309,85 @@ export class ChatOrchestrator {
           }
         );
     }
+  }
+
+  private async handleSetGoalCommand(
+    message: IncomingChatMessage,
+    goal: string,
+    currentBindingResolution: ChatWorkspaceResolution,
+    replyMetadata: TextNoticeReplyMetadata
+  ): Promise<void> {
+    const normalizedGoal = goal.trim();
+    if (!normalizedGoal) {
+      await this.sendTextNotice(message.chatId, "goal 不能为空。", {
+        messageId: message.messageId,
+        context: "发送 goal 设置提示失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    this.sessionStore.save(
+      buildControlSessionPatch(
+        message,
+        this.sessionStore.get(message.chatId),
+        {
+          goal: normalizedGoal,
+          goalUpdatedAt: updatedAt
+        },
+        this.defaultWorkspace,
+        updatedAt
+      )
+    );
+
+    await this.sendTextNotice(
+      message.chatId,
+      ["已设置这个群的 goal。", `Goal：${normalizedGoal}`, renderGoalEffect(currentBindingResolution)].join("\n"),
+      {
+        messageId: message.messageId,
+        context: "发送 goal 设置结果失败",
+        ...replyMetadata
+      }
+    );
+  }
+
+  private async handleClearGoalCommand(
+    message: IncomingChatMessage,
+    currentBindingResolution: ChatWorkspaceResolution,
+    replyMetadata: TextNoticeReplyMetadata
+  ): Promise<void> {
+    const existingGoal = this.sessionStore.get(message.chatId)?.goal;
+    const updatedAt = new Date().toISOString();
+    this.sessionStore.save(
+      buildControlSessionPatch(
+        message,
+        this.sessionStore.get(message.chatId),
+        {
+          goal: undefined,
+          goalUpdatedAt: updatedAt
+        },
+        this.defaultWorkspace,
+        updatedAt
+      )
+    );
+
+    await this.sendTextNotice(
+      message.chatId,
+      existingGoal
+        ? [
+            "已清除这个群的 goal。",
+            currentBindingResolution.ok
+              ? "后续 Codex/Pi 任务不会再带这个 goal。"
+              : "这个群当前还没有可用工作区绑定。"
+          ].join("\n")
+        : "这个群当前没有设置 goal。",
+      {
+        messageId: message.messageId,
+        context: "发送 goal 清除结果失败",
+        ...replyMetadata
+      }
+    );
   }
 
   private async handleScheduleCommand(
@@ -1456,6 +1575,13 @@ export class ChatOrchestrator {
       cli: workspaceResolution.cli,
       workspaceId: workspaceResolution.workspaceId,
       executionMode: workspaceResolution.executionMode,
+      provider: workspaceResolution.provider,
+      model: workspaceResolution.model,
+      thinking: workspaceResolution.thinking,
+      goal: existingSession?.goal,
+      goalUpdatedAt: existingSession?.goalUpdatedAt,
+      controlThreadId: existingSession?.controlThreadId,
+      controlReplyToMessageId: existingSession?.controlReplyToMessageId,
       ...buildSessionMetadataPatch(message, existingSession),
       activeRunId: undefined,
       activeTurnId: undefined,

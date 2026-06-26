@@ -104,7 +104,7 @@ export interface RuntimeRestoreResult {
 }
 
 function normalizeCli(value: unknown): ChatCli {
-  return value === "claude" || value === "kimi" ? value : "codex";
+  return value === "claude" || value === "kimi" || value === "pi" ? value : "codex";
 }
 
 function normalizeExecutionMode(value: unknown): ChatExecutionMode {

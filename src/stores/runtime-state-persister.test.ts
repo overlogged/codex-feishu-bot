@@ -33,8 +33,20 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
     threadId: "thread_1",
     cli: "codex",
     workspaceId: "/workspace",
+    goal: "每次改代码前先看测试",
+    goalUpdatedAt: "2026-03-09T00:00:00.000Z",
     activeRunId: "run_1",
     activeTurnId: "turn_1",
+    updatedAt: "2026-03-09T00:00:00.000Z"
+  });
+  sessionStore.save({
+    chatId: "oc_chat_pi",
+    threadId: "thread_pi",
+    cli: "pi",
+    workspaceId: "/workspace",
+    executionMode: "docker",
+    goal: "Pi 也带上这个 goal",
+    goalUpdatedAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z"
   });
   runStore.save({
@@ -100,8 +112,16 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
   assert.ok(restoredSession);
   assert.equal(restoredSession.threadId, "thread_1");
   assert.equal(restoredSession.cli, "codex");
+  assert.equal(restoredSession.goal, "每次改代码前先看测试");
+  assert.equal(restoredSession.goalUpdatedAt, "2026-03-09T00:00:00.000Z");
   assert.equal(restoredSession.activeRunId, undefined);
   assert.equal(restoredSession.activeTurnId, undefined);
+
+  const restoredPiSession = restoredSessionStore.get("oc_chat_pi");
+  assert.ok(restoredPiSession);
+  assert.equal(restoredPiSession.cli, "pi");
+  assert.equal(restoredPiSession.goal, "Pi 也带上这个 goal");
+  assert.equal(restoredPiSession.goalUpdatedAt, "2026-03-09T00:00:00.000Z");
 
   const restoredRun = restoredRunStore.get("run_1");
   assert.ok(restoredRun);

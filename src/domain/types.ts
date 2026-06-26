@@ -26,6 +26,8 @@ export interface ChatSession {
   provider?: string;
   model?: string;
   thinking?: string;
+  goal?: string;
+  goalUpdatedAt?: string;
   controlThreadId?: string;
   controlReplyToMessageId?: string;
   chatType?: string;

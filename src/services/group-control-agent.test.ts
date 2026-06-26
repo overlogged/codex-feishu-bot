@@ -30,6 +30,7 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
     async *runTurn(context): AsyncGenerator<CodexEvent> {
       runTurnCalls += 1;
       lastPrompt = context.message.text;
+      assert.equal(context.cli, "codex");
       assert.match(context.threadId, /^pending:group-control:oc_group_1:/);
       yield {
         kind: "thread_bound",
@@ -223,6 +224,54 @@ test("CodexGroupControlAgent parses multiple actions from an actions array", asy
     }
   ]);
   assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
+});
+
+test("CodexGroupControlAgent interprets goal control intents", async () => {
+  let lastPrompt = "";
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      lastPrompt = context.message.text;
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"actions":[{"kind":"set_goal","goal":"每次改代码前先看测试"},{"kind":"clear_goal"}]}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 设置 goal 为每次改代码前先看测试，然后清除 goal"
+    }),
+    {
+      catalog: [],
+      scheduledTasks: [],
+      goal: "旧 goal",
+      currentBinding: {
+        configured: true,
+        cli: "codex",
+        executionMode: "host",
+        workspaceId: "/home/overlogged/Quant"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "set_goal",
+      goal: "每次改代码前先看测试"
+    },
+    {
+      kind: "clear_goal"
+    }
+  ]);
+  assert.match(lastPrompt, /当前群 goal：\n旧 goal/);
+  assert.match(lastPrompt, /"kind":"set_goal"/);
+  assert.match(lastPrompt, /goal 只影响后续 Codex 和 Pi 任务/);
 });
 
 test("CodexGroupControlAgent rejects missing final answers", async () => {
