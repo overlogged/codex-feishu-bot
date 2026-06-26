@@ -1702,14 +1702,15 @@ test("ChatOrchestrator routes natural-language group mentions into the reusable 
   assert.match(sentTexts[0] ?? "", /请直接说你想怎么配置这个群/);
 });
 
-test("ChatOrchestrator sets group goal and passes it to subsequent codex turns", async () => {
+test("ChatOrchestrator sets a native Codex goal and streams the goal turn", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();
   const conversationStore = new ConversationStore();
   const projector = new MessageProjector(runStore, conversationStore);
   const sentTexts: string[] = [];
-  let capturedRunGoal: string | undefined;
-  let capturedEnsureGoal: string | undefined;
+  let capturedRunObjective: string | undefined;
+  let capturedEnsureLegacyGoal: string | undefined;
+  let runGoalCalls = 0;
   let resolveRun: (() => void) | undefined;
   const runCompleted = new Promise<void>((resolve) => {
     resolveRun = resolve;
@@ -1728,11 +1729,12 @@ test("ChatOrchestrator sets group goal and passes it to subsequent codex turns",
 
   const codexWorker: CodexWorker = {
     async ensureThread(context) {
-      capturedEnsureGoal = context.session?.goal;
+      capturedEnsureLegacyGoal = (context.session as { goal?: string } | undefined)?.goal;
       return context.session?.threadId ?? "thread_group_main";
     },
-    async *runTurn(context): AsyncGenerator<CodexEvent> {
-      capturedRunGoal = context.session?.goal;
+    async *runGoal(context): AsyncGenerator<CodexEvent> {
+      runGoalCalls += 1;
+      capturedRunObjective = context.objective;
       yield {
         kind: "thread_bound",
         threadId: context.threadId
@@ -1751,7 +1753,14 @@ test("ChatOrchestrator sets group goal and passes it to subsequent codex turns",
         itemId: "msg_final_goal_1",
         text: "收到 goal"
       };
+      yield {
+        kind: "run_status",
+        status: "completed"
+      };
       resolveRun?.();
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      throw new Error("runTurn should not be used for native goal");
     }
   };
 
@@ -1791,36 +1800,26 @@ test("ChatOrchestrator sets group goal and passes it to subsequent codex turns",
     })
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  assert.equal(sessionStore.get("oc_group_1")?.goal, "每次改代码前先看测试");
-  assert.match(sessionStore.get("oc_group_1")?.goalUpdatedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
-  assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
-  assert.match(sentTexts[0] ?? "", /已设置这个群的 goal/);
-  assert.match(sentTexts[0] ?? "", /后续 Codex 任务会带上这个 goal/);
-
-  orchestrator.enqueue(
-    createMessage({
-      messageId: "om_group_goal_task_1",
-      text: "开始执行这个任务"
-    })
-  );
-
   await runCompleted;
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(capturedEnsureGoal, "每次改代码前先看测试");
-  assert.equal(capturedRunGoal, "每次改代码前先看测试");
-  assert.equal(sessionStore.get("oc_group_1")?.goal, "每次改代码前先看测试");
+  assert.equal((sessionStore.get("oc_group_1") as { goal?: string } | undefined)?.goal, undefined);
+  assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
+  assert.match(sentTexts[0] ?? "", /已调用 Codex native \/goal 设置目标/);
+  assert.equal(capturedEnsureLegacyGoal, undefined);
+  assert.equal(capturedRunObjective, "每次改代码前先看测试");
+  assert.equal(runGoalCalls, 1);
 });
 
-test("ChatOrchestrator clears group goal from the control plane", async () => {
+test("ChatOrchestrator clears a native Codex goal from the control plane", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();
   const conversationStore = new ConversationStore();
   const projector = new MessageProjector(runStore, conversationStore);
   const sentTexts: string[] = [];
   let runTurnCalls = 0;
+  let clearGoalCalls = 0;
+  let clearGoalThreadId: string | undefined;
 
   sessionStore.save({
     chatId: "oc_group_1",
@@ -1832,7 +1831,7 @@ test("ChatOrchestrator clears group goal from the control plane", async () => {
     goal: "每次改代码前先看测试",
     controlThreadId: "thread_control_existing",
     updatedAt: new Date().toISOString()
-  });
+  } as never);
 
   const orchestrator = new ChatOrchestrator(
     sessionStore,
@@ -1849,6 +1848,23 @@ test("ChatOrchestrator clears group goal from the control plane", async () => {
     {
       async ensureThread() {
         return "thread_should_not_start";
+      },
+      async getGoal() {
+        return {
+          threadId: "thread_group_main",
+          objective: "每次改代码前先看测试",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1,
+          updatedAt: 1
+        };
+      },
+      async clearGoal(context) {
+        clearGoalCalls += 1;
+        clearGoalThreadId = context.threadId;
+        return true;
       },
       async *runTurn(): AsyncGenerator<CodexEvent> {
         runTurnCalls += 1;
@@ -1878,11 +1894,12 @@ test("ChatOrchestrator clears group goal from the control plane", async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.equal(runTurnCalls, 0);
+  assert.equal(clearGoalCalls, 1);
+  assert.equal(clearGoalThreadId, "thread_group_main");
   assert.equal(runStore.list().length, 0);
-  assert.equal(sessionStore.get("oc_group_1")?.goal, undefined);
-  assert.match(sessionStore.get("oc_group_1")?.goalUpdatedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal((sessionStore.get("oc_group_1") as { goal?: string } | undefined)?.goal, undefined);
   assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
-  assert.match(sentTexts[0] ?? "", /已清除这个群的 goal/);
+  assert.match(sentTexts[0] ?? "", /已调用 Codex native \/goal clear/);
 });
 
 test("ChatOrchestrator routes scheduled tasks into the active session", async () => {

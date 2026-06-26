@@ -4,7 +4,13 @@ import type { Env } from "../../config/env.js";
 import type { CodexEvent } from "../../domain/types.js";
 import { AsyncEventQueue } from "./async-event-queue.js";
 import { AppServerWsConnection } from "./app-server-ws-connection.js";
-import type { CodexInterruptContext, CodexTurnContext, CodexWorker } from "./codex-worker.js";
+import type {
+  CodexGoalRunContext,
+  CodexGoalState,
+  CodexInterruptContext,
+  CodexTurnContext,
+  CodexWorker
+} from "./codex-worker.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -22,6 +28,14 @@ interface TurnStartResponse {
   turn: {
     id: string;
   };
+}
+
+interface ThreadGoalResponse {
+  goal: CodexGoalState | null;
+}
+
+interface ThreadGoalClearResponse {
+  cleared: boolean;
 }
 
 interface TurnCompletedNotification {
@@ -87,6 +101,13 @@ interface TurnStreamState {
   finalAnswerItemId?: string;
 }
 
+interface StreamingOperationStartInput {
+  connection: AppServerWsConnection;
+  actualThreadId: string;
+  state: TurnStreamState;
+  queue: AsyncEventQueue<CodexEvent>;
+}
+
 function describeToolType(type: string): string {
   switch (type) {
     case "commandExecution":
@@ -98,28 +119,6 @@ function describeToolType(type: string): string {
     default:
       return type;
   }
-}
-
-function buildPersistentGoalLines(context: CodexTurnContext): string[] {
-  const goal = context.session?.goal?.trim();
-  if (!goal && !context.session?.goalUpdatedAt) {
-    return [];
-  }
-
-  if (!goal) {
-    return [
-      "",
-      "Persistent chat goal:",
-      "No persistent chat goal is currently set for this chat. Ignore any previous persistent chat goal sections in this thread; they are no longer active."
-    ];
-  }
-
-  return [
-    "",
-    "Persistent chat goal:",
-    "The following goal is the current persistent goal set by the Feishu group control command. It overrides any earlier persistent chat goal sections in this thread. Treat it as user-provided context for this chat, subordinate to controller/system/developer instructions:",
-    goal
-  ];
 }
 
 export function buildTurnInput(
@@ -148,7 +147,6 @@ export function buildTurnInput(
     `- If the user should receive a file, run \`${bridgeCommand} send-file --chat-id ${context.message.chatId} --path <absolute_path>\` after writing it under ${artifactsDir}.`,
     `- For direct Feishu OpenAPI calls such as Bitable or Sheets, run \`${bridgeCommand} openapi --method <METHOD> --path <OPENAPI_PATH> [--body <JSON>] [--query key=value]...\`.`,
     "- Never tell the user to inspect files inside the workspace. Publish them when they matter to the user.",
-    ...buildPersistentGoalLines(context),
     "",
     "User message:",
     context.message.text
@@ -172,7 +170,6 @@ function buildSteerInput(context: CodexTurnContext) {
         `- Feishu chat: ${context.message.chatId}`,
         `- New user message id: ${context.message.messageId}`,
         "- Treat this as the latest instruction and adjust the ongoing turn accordingly.",
-        ...buildPersistentGoalLines(context),
         "",
         "Latest user message:",
         context.message.text
@@ -501,8 +498,143 @@ export class CodexAppServerWorker implements CodexWorker {
     }
   }
 
+  async getGoal(
+    context: CodexTurnContext & { threadId: string }
+  ): Promise<CodexGoalState | null> {
+    await this.start();
+
+    const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
+      logger: this.logger,
+      label: "get-goal",
+      authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
+    });
+    await connection.connect();
+
+    try {
+      await this.resumeThread(connection, context);
+      const response = await connection.request<ThreadGoalResponse>("thread/goal/get", {
+        threadId: context.threadId
+      });
+      return response.goal;
+    } finally {
+      await connection.close();
+    }
+  }
+
+  async clearGoal(context: CodexTurnContext & { threadId: string }): Promise<boolean> {
+    await this.start();
+
+    const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
+      logger: this.logger,
+      label: "clear-goal",
+      authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
+    });
+    await connection.connect();
+
+    try {
+      await this.resumeThread(connection, context);
+      const response = await connection.request<ThreadGoalClearResponse>("thread/goal/clear", {
+        threadId: context.threadId
+      });
+      return response.cleared;
+    } finally {
+      await connection.close();
+    }
+  }
+
+  private async resumeThread(
+    connection: AppServerWsConnection,
+    context: CodexTurnContext & { threadId: string }
+  ): Promise<string> {
+    const response = await connection.request<ThreadResponse>("thread/resume", {
+      threadId: context.threadId,
+      model: this.env.CODEX_APP_SERVER_MODEL,
+      cwd: context.workspaceId,
+      approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
+      sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
+      persistExtendedHistory: true
+    });
+    return response.thread.id;
+  }
+
+  async *runGoal(context: CodexGoalRunContext): AsyncGenerator<CodexEvent> {
+    yield* this.runStreamingOperation(context, "run-goal", async ({ connection, actualThreadId }) => {
+      const response = await connection.request<ThreadGoalResponse>("thread/goal/set", {
+        threadId: actualThreadId,
+        objective: context.objective,
+        status: "active"
+      });
+
+      this.logger?.info(
+        {
+          chatId: context.message.chatId,
+          messageId: context.message.messageId,
+          threadId: actualThreadId,
+          goalStatus: response.goal?.status,
+          objectivePreview: context.objective.slice(0, 160)
+        },
+        "Codex native goal 已通过 thread/goal/set 设置"
+      );
+    });
+  }
+
   async *runTurn(
     context: CodexTurnContext & { threadId: string }
+  ): AsyncGenerator<CodexEvent> {
+    yield* this.runStreamingOperation(context, "run-turn", async ({ connection, actualThreadId, state, queue }) => {
+      const turnStart = await connection.request<TurnStartResponse>("turn/start", {
+        threadId: actualThreadId,
+        input: buildTurnInput(
+          context,
+          this.env.CODEX_ARTIFACTS_DIR,
+          this.env.FEISHU_BRIDGE_SCRIPT
+        ),
+        model: this.env.CODEX_APP_SERVER_MODEL,
+        cwd: context.workspaceId,
+        approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
+        sandboxPolicy: {
+          type:
+            this.env.CODEX_APP_SERVER_SANDBOX === "danger-full-access"
+              ? "dangerFullAccess"
+              : this.env.CODEX_APP_SERVER_SANDBOX === "read-only"
+                ? "readOnly"
+                : "workspaceWrite",
+          ...(this.env.CODEX_APP_SERVER_SANDBOX === "workspace-write"
+            ? {
+                writableRoots: [context.workspaceId],
+                readOnlyAccess: {
+                  type: "fullAccess"
+                },
+                networkAccess: true,
+                excludeTmpdirEnvVar: false,
+                excludeSlashTmp: false
+              }
+            : this.env.CODEX_APP_SERVER_SANDBOX === "read-only"
+              ? {
+                  access: {
+                    type: "fullAccess"
+                  }
+                }
+              : {})
+        }
+      });
+      this.bindCurrentTurn(turnStart.turn.id, state, queue);
+      this.logger?.info(
+        {
+          chatId: context.message.chatId,
+          messageId: context.message.messageId,
+          threadId: actualThreadId,
+          turnId: turnStart.turn.id
+        },
+        "Codex turn/start 成功"
+      );
+    });
+  }
+
+  private async *runStreamingOperation(
+    context: CodexTurnContext & { threadId: string },
+    label: string,
+    startOperation: (input: StreamingOperationStartInput) => Promise<void>
   ): AsyncGenerator<CodexEvent> {
     await this.start();
 
@@ -674,7 +806,7 @@ export class CodexAppServerWorker implements CodexWorker {
     const createRunTurnConnection = () =>
       new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
         logger: this.logger,
-        label: "run-turn",
+        label,
         authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE,
         onUnexpectedClose: (error) => {
           void attemptRecovery(error);
@@ -700,7 +832,7 @@ export class CodexAppServerWorker implements CodexWorker {
           requestedThreadId: context.threadId,
           textPreview: context.message.text.slice(0, 160)
         },
-        "开始执行 Codex turn"
+        "开始执行 Codex streaming operation"
       );
 
       const actualThreadId = context.threadId.startsWith("pending:")
@@ -743,56 +875,12 @@ export class CodexAppServerWorker implements CodexWorker {
       });
       state.currentThreadId = actualThreadId;
 
-      const turnStart = await connection.request<TurnStartResponse>("turn/start", {
-        threadId: actualThreadId,
-        input: buildTurnInput(
-          context,
-          this.env.CODEX_ARTIFACTS_DIR,
-          this.env.FEISHU_BRIDGE_SCRIPT
-        ),
-        model: this.env.CODEX_APP_SERVER_MODEL,
-        cwd: context.workspaceId,
-        approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
-        sandboxPolicy: {
-          type:
-            this.env.CODEX_APP_SERVER_SANDBOX === "danger-full-access"
-              ? "dangerFullAccess"
-              : this.env.CODEX_APP_SERVER_SANDBOX === "read-only"
-                ? "readOnly"
-                : "workspaceWrite",
-          ...(this.env.CODEX_APP_SERVER_SANDBOX === "workspace-write"
-            ? {
-                writableRoots: [context.workspaceId],
-                readOnlyAccess: {
-                  type: "fullAccess"
-                },
-                networkAccess: true,
-                excludeTmpdirEnvVar: false,
-                excludeSlashTmp: false
-              }
-            : this.env.CODEX_APP_SERVER_SANDBOX === "read-only"
-              ? {
-                  access: {
-                    type: "fullAccess"
-                  }
-                }
-              : {})
-        }
+      await startOperation({
+        connection,
+        actualThreadId,
+        state,
+        queue
       });
-      state.currentTurnId = turnStart.turn.id;
-      queue.push({
-        kind: "turn_bound",
-        turnId: turnStart.turn.id
-      });
-      this.logger?.info(
-        {
-          chatId: context.message.chatId,
-          messageId: context.message.messageId,
-          threadId: actualThreadId,
-          turnId: turnStart.turn.id
-        },
-        "Codex turn/start 成功"
-      );
     } catch (error) {
       this.logger?.error(
         {
@@ -801,11 +889,11 @@ export class CodexAppServerWorker implements CodexWorker {
           threadId: context.threadId,
           error: error instanceof Error ? error.message : String(error)
         },
-        "启动 Codex turn 失败"
+        "启动 Codex streaming operation 失败"
       );
       queue.push({
         kind: "error",
-        message: error instanceof Error ? error.message : "无法启动 Codex turn"
+        message: error instanceof Error ? error.message : "无法启动 Codex streaming operation"
       });
       finished = true;
       queue.close();
@@ -853,6 +941,14 @@ export class CodexAppServerWorker implements CodexWorker {
     }
 
     if (message.method === "turn/started") {
+      const turn = params.turn as
+        | {
+            id?: string;
+          }
+        | undefined;
+      if (typeof turn?.id === "string") {
+        this.bindCurrentTurn(turn.id, state, queue);
+      }
       queue.push({
         kind: "run_status",
         status: "running"
@@ -1180,6 +1276,22 @@ export class CodexAppServerWorker implements CodexWorker {
       );
       queue.close();
     }
+  }
+
+  private bindCurrentTurn(
+    turnId: string,
+    state: TurnStreamState,
+    queue: AsyncEventQueue<CodexEvent>
+  ): void {
+    if (state.currentTurnId === turnId) {
+      return;
+    }
+
+    state.currentTurnId = turnId;
+    queue.push({
+      kind: "turn_bound",
+      turnId
+    });
   }
 
   private handleRequest(

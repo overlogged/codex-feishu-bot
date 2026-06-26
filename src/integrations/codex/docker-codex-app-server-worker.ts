@@ -1,7 +1,12 @@
 import type { Env } from "../../config/env.js";
 import type { CodexEvent } from "../../domain/types.js";
 import { CodexAppServerWorker } from "./app-server-worker.js";
-import type { CodexInterruptContext, CodexTurnContext, CodexWorker } from "./codex-worker.js";
+import type {
+  CodexGoalRunContext,
+  CodexInterruptContext,
+  CodexTurnContext,
+  CodexWorker
+} from "./codex-worker.js";
 import {
   buildDockerExecutionRunArgs,
   DockerCommandRunner,
@@ -75,6 +80,33 @@ export class DockerCodexAppServerWorker implements CodexWorker {
       throw new Error("docker codex worker 不支持 interruptTurn");
     }
     return delegate.interruptTurn(context);
+  }
+
+  async getGoal(context: CodexTurnContext & { threadId: string }) {
+    await this.ensureServerReady();
+    const delegate = this.createDelegate();
+    if (!delegate.getGoal) {
+      throw new Error("docker codex worker 不支持 Codex native goal");
+    }
+    return delegate.getGoal(context);
+  }
+
+  async clearGoal(context: CodexTurnContext & { threadId: string }) {
+    await this.ensureServerReady();
+    const delegate = this.createDelegate();
+    if (!delegate.clearGoal) {
+      throw new Error("docker codex worker 不支持 Codex native goal");
+    }
+    return delegate.clearGoal(context);
+  }
+
+  async *runGoal(context: CodexGoalRunContext): AsyncGenerator<CodexEvent> {
+    await this.ensureServerReady();
+    const delegate = this.createDelegate();
+    if (!delegate.runGoal) {
+      throw new Error("docker codex worker 不支持 Codex native goal");
+    }
+    yield* delegate.runGoal(context);
   }
 
   async *runTurn(context: CodexTurnContext & { threadId: string }): AsyncGenerator<CodexEvent> {

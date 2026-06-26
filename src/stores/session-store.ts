@@ -1,5 +1,14 @@
 import type { ChatSession } from "../domain/types.js";
 
+function stripLegacyGoalFields(session: ChatSession): ChatSession {
+  const { goal: _goal, goalUpdatedAt: _goalUpdatedAt, ...cleanSession } =
+    session as ChatSession & {
+      goal?: string;
+      goalUpdatedAt?: string;
+    };
+  return cleanSession;
+}
+
 export class SessionStore {
   private readonly sessions = new Map<string, ChatSession>();
 
@@ -10,9 +19,10 @@ export class SessionStore {
   }
 
   save(session: ChatSession): ChatSession {
-    this.sessions.set(session.chatId, session);
+    const cleanSession = stripLegacyGoalFields(session);
+    this.sessions.set(cleanSession.chatId, cleanSession);
     this.onChange?.();
-    return session;
+    return cleanSession;
   }
 
   attachRun(chatId: string, runId: string): void {
@@ -76,7 +86,8 @@ export class SessionStore {
   replaceAll(sessions: ChatSession[]): void {
     this.sessions.clear();
     for (const session of sessions) {
-      this.sessions.set(session.chatId, session);
+      const cleanSession = stripLegacyGoalFields(session);
+      this.sessions.set(cleanSession.chatId, cleanSession);
     }
   }
 

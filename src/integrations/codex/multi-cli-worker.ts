@@ -1,5 +1,9 @@
 import type { ChatCli } from "../../domain/types.js";
-import type { CodexTurnContext, CodexWorker } from "./codex-worker.js";
+import type {
+  CodexGoalRunContext,
+  CodexTurnContext,
+  CodexWorker
+} from "./codex-worker.js";
 
 export class MultiCliWorker implements CodexWorker {
   constructor(private readonly workers: Record<ChatCli, CodexWorker>) {}
@@ -39,6 +43,30 @@ export class MultiCliWorker implements CodexWorker {
       throw new Error(`${context.cli} CLI 不支持 interruptTurn`);
     }
     return worker.interruptTurn(context);
+  }
+
+  getGoal(context: CodexTurnContext & { threadId: string }) {
+    const worker = this.workers[context.cli];
+    if (!worker.getGoal) {
+      throw new Error(`${context.cli} CLI 不支持 Codex native goal`);
+    }
+    return worker.getGoal(context);
+  }
+
+  clearGoal(context: CodexTurnContext & { threadId: string }) {
+    const worker = this.workers[context.cli];
+    if (!worker.clearGoal) {
+      throw new Error(`${context.cli} CLI 不支持 Codex native goal`);
+    }
+    return worker.clearGoal(context);
+  }
+
+  async *runGoal(context: CodexGoalRunContext) {
+    const worker = this.workers[context.cli];
+    if (!worker.runGoal) {
+      throw new Error(`${context.cli} CLI 不支持 Codex native goal`);
+    }
+    yield* worker.runGoal(context);
   }
 
   async *runTurn(context: CodexTurnContext & { threadId: string }) {

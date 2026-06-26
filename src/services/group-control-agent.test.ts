@@ -269,9 +269,9 @@ test("CodexGroupControlAgent interprets goal control intents", async () => {
       kind: "clear_goal"
     }
   ]);
-  assert.match(lastPrompt, /当前群 goal：\n旧 goal/);
+  assert.match(lastPrompt, /当前群 Codex native goal：\n旧 goal/);
   assert.match(lastPrompt, /"kind":"set_goal"/);
-  assert.match(lastPrompt, /goal 只影响后续 Codex 和 Pi 任务/);
+  assert.match(lastPrompt, /goal 指 Codex 原生 \/goal 功能/);
 });
 
 test("CodexGroupControlAgent rejects missing final answers", async () => {

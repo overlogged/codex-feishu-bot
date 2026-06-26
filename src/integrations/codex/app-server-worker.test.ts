@@ -15,7 +15,6 @@ function createContext(overrides: Partial<CodexTurnContext> = {}): CodexTurnCont
       cli: "codex",
       workspaceId: "/workspace/project",
       executionMode: "host",
-      goal: "每次改代码前先看测试",
       updatedAt: "2026-04-04T00:00:00.000Z"
     },
     message: {
@@ -33,16 +32,15 @@ function createContext(overrides: Partial<CodexTurnContext> = {}): CodexTurnCont
   };
 }
 
-test("buildTurnInput includes the persistent group goal for Codex turns", () => {
+test("buildTurnInput does not inject a persistent group goal for Codex turns", () => {
   const input = buildTurnInput(createContext(), "/workspace/artifacts", "/bridge.mjs");
   const text = input[0]?.text ?? "";
 
-  assert.match(text, /Persistent chat goal/);
-  assert.match(text, /每次改代码前先看测试/);
+  assert.doesNotMatch(text, /Persistent chat goal/);
   assert.match(text, /User message:\n开始处理/);
 });
 
-test("buildTurnInput omits the goal section when no group goal is set", () => {
+test("buildTurnInput keeps Feishu bridge instructions", () => {
   const input = buildTurnInput(
     createContext({
       session: {
@@ -59,25 +57,5 @@ test("buildTurnInput omits the goal section when no group goal is set", () => {
   );
 
   assert.doesNotMatch(input[0]?.text ?? "", /Persistent chat goal/);
-});
-
-test("buildTurnInput explicitly clears earlier persistent goals", () => {
-  const input = buildTurnInput(
-    createContext({
-      session: {
-        chatId: "oc_group_1",
-        threadId: "thread_1",
-        cli: "codex",
-        workspaceId: "/workspace/project",
-        executionMode: "host",
-        goalUpdatedAt: "2026-04-04T00:00:00.000Z",
-        updatedAt: "2026-04-04T00:00:00.000Z"
-      }
-    }),
-    "/workspace/artifacts",
-    "/bridge.mjs"
-  );
-
-  assert.match(input[0]?.text ?? "", /No persistent chat goal is currently set/);
-  assert.match(input[0]?.text ?? "", /Ignore any previous persistent chat goal sections/);
+  assert.match(input[0]?.text ?? "", /Controller instructions for the Feishu bridge environment/);
 });

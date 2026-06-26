@@ -2,6 +2,7 @@ import type {
   ChatCli,
   ChatExecutionMode,
   ChatSession,
+  CodexEvent,
   IncomingChatMessage,
   ScheduledTaskRecord
 } from "../domain/types.js";
@@ -454,9 +455,7 @@ function buildSessionMetadataPatch(
 function buildControlSessionPatch(
   message: IncomingChatMessage,
   existingSession: ChatSession | undefined,
-  patch: Partial<
-    Pick<ChatSession, "controlThreadId" | "controlReplyToMessageId" | "goal" | "goalUpdatedAt">
-  >,
+  patch: Partial<Pick<ChatSession, "controlThreadId" | "controlReplyToMessageId">>,
   defaultWorkspace: string,
   observedAt = new Date().toISOString()
 ): ChatSession {
@@ -502,22 +501,6 @@ function renderScheduleList(tasks: ScheduledTaskRecord[]): string {
     "",
     renderScheduleHelp()
   ].join("\n\n");
-}
-
-function renderGoalEffect(binding: ChatWorkspaceResolution): string {
-  if (!binding.ok) {
-    return "这个 goal 会先保存下来；绑定 Codex 或 Pi 工作区后生效。";
-  }
-
-  if (binding.cli === "codex") {
-    return "后续 Codex 任务会带上这个 goal。";
-  }
-
-  if (binding.cli === "pi") {
-    return "后续 Pi 任务也会带上这个 goal。";
-  }
-
-  return `当前群绑定的是 ${renderCliLabel(binding.cli)}，goal 已保存，但不会影响 ${renderCliLabel(binding.cli)}；切到 Codex 或 Pi 后生效。`;
 }
 
 function isNewSessionCommand(message: IncomingChatMessage): boolean {
@@ -677,8 +660,6 @@ export class ChatOrchestrator {
     const resolvedProvider = routing?.provider ?? existingSession?.provider;
     const resolvedModel = routing?.model ?? existingSession?.model;
     const resolvedThinking = routing?.thinking ?? existingSession?.thinking;
-    const preservedGoal = existingSession?.goal;
-    const preservedGoalUpdatedAt = existingSession?.goalUpdatedAt;
     const reusableSession =
       existingSession?.workspaceId === resolvedWorkspaceId &&
       existingSession.cli === resolvedCli &&
@@ -697,8 +678,6 @@ export class ChatOrchestrator {
       provider: resolvedProvider,
       model: resolvedModel,
       thinking: resolvedThinking,
-      goal: preservedGoal,
-      goalUpdatedAt: preservedGoalUpdatedAt,
       controlThreadId: existingSession?.controlThreadId,
       controlReplyToMessageId: existingSession?.controlReplyToMessageId,
       ...buildSessionMetadataPatch(message, reusableSession ?? existingSession, observedAt),
@@ -744,48 +723,29 @@ export class ChatOrchestrator {
         });
       }
 
-      for await (const event of this.codexWorker.runTurn({
-        session: this.sessionStore.get(message.chatId),
-        cli: resolvedCli,
-        workspaceId: resolvedWorkspaceId,
-        executionMode: resolvedExecutionMode,
-        provider: resolvedProvider,
-        model: resolvedModel,
-        thinking: resolvedThinking,
+      await this.projectCodexEvents(
         message,
-        threadId
-      })) {
-        if (event.kind === "turn_bound") {
-          this.sessionStore.bindTurn(message.chatId, event.turnId, run.runId);
-          continue;
-        }
-
-        const result = this.projector.apply(run.runId, event);
-        this.sessionStore.updateBoundRun(message.chatId, run.runId, {
-          threadId: result.run.threadId,
+        run,
+        {
           cli: resolvedCli,
           workspaceId: resolvedWorkspaceId,
           executionMode: resolvedExecutionMode,
           provider: resolvedProvider,
           model: resolvedModel,
           thinking: resolvedThinking
-        });
-
-        for (const item of result.items) {
-          this.logger.info(
-            {
-              runId: run.runId,
-              chatId: message.chatId,
-              itemId: item.itemId,
-              kind: item.kind,
-              phase: item.phase,
-              feishuMessageId: item.feishuMessageId
-            },
-            "消息投影已更新，准备同步飞书"
-          );
-          this.deliveryService.schedule(item);
-        }
-      }
+        },
+        this.codexWorker.runTurn({
+          session: this.sessionStore.get(message.chatId),
+          cli: resolvedCli,
+          workspaceId: resolvedWorkspaceId,
+          executionMode: resolvedExecutionMode,
+          provider: resolvedProvider,
+          model: resolvedModel,
+          thinking: resolvedThinking,
+          message,
+          threadId
+        })
+      );
     } catch (error) {
       const messageText =
         error instanceof Error ? error.message : "处理过程中发生未知错误";
@@ -816,6 +776,46 @@ export class ChatOrchestrator {
         );
       });
       this.sessionStore.releaseRun(message.chatId, run.runId);
+    }
+  }
+
+  private async projectCodexEvents(
+    message: IncomingChatMessage,
+    run: ReturnType<RunStore["create"]>,
+    routing: ChatRouting,
+    events: AsyncIterable<CodexEvent>
+  ): Promise<void> {
+    for await (const event of events) {
+      if (event.kind === "turn_bound") {
+        this.sessionStore.bindTurn(message.chatId, event.turnId, run.runId);
+        continue;
+      }
+
+      const result = this.projector.apply(run.runId, event);
+      this.sessionStore.updateBoundRun(message.chatId, run.runId, {
+        threadId: result.run.threadId,
+        cli: routing.cli,
+        workspaceId: routing.workspaceId,
+        executionMode: routing.executionMode,
+        provider: routing.provider,
+        model: routing.model,
+        thinking: routing.thinking
+      });
+
+      for (const item of result.items) {
+        this.logger.info(
+          {
+            runId: run.runId,
+            chatId: message.chatId,
+            itemId: item.itemId,
+            kind: item.kind,
+            phase: item.phase,
+            feishuMessageId: item.feishuMessageId
+          },
+          "消息投影已更新，准备同步飞书"
+        );
+        this.deliveryService.schedule(item);
+      }
     }
   }
 
@@ -1090,12 +1090,17 @@ export class ChatOrchestrator {
         message,
         session: existingSession
       });
+      const currentNativeGoal = await this.readNativeCodexGoalObjective(
+        message,
+        currentBindingResolution,
+        existingSession
+      );
       const result = await this.groupControlAgent.interpret(
         message,
         {
           catalog,
           scheduledTasks: this.scheduleService.listByChat(message.chatId),
-          goal: existingSession?.goal,
+          goal: currentNativeGoal,
           currentBinding: currentBindingResolution.ok
             ? {
                 configured: true,
@@ -1152,6 +1157,62 @@ export class ChatOrchestrator {
     }
   }
 
+  private getNativeGoalThreadId(
+    binding: ChatWorkspaceResolution,
+    session: ChatSession | undefined
+  ): string | undefined {
+    if (
+      !binding.ok ||
+      binding.cli !== "codex" ||
+      !session?.threadId ||
+      session.threadId.startsWith("pending:") ||
+      session.cli !== "codex" ||
+      session.workspaceId !== binding.workspaceId ||
+      normalizeExecutionMode(session.executionMode) !== binding.executionMode
+    ) {
+      return undefined;
+    }
+
+    return session.threadId;
+  }
+
+  private async readNativeCodexGoalObjective(
+    message: IncomingChatMessage,
+    binding: ChatWorkspaceResolution,
+    session: ChatSession | undefined
+  ): Promise<string | undefined> {
+    const threadId = this.getNativeGoalThreadId(binding, session);
+    if (!threadId || !binding.ok || !this.codexWorker.getGoal) {
+      return undefined;
+    }
+
+    try {
+      const goal = await this.codexWorker.getGoal({
+        session,
+        cli: "codex",
+        workspaceId: binding.workspaceId,
+        executionMode: binding.executionMode,
+        provider: binding.provider,
+        model: binding.model,
+        thinking: binding.thinking,
+        message,
+        threadId
+      });
+      return goal?.objective?.trim() || undefined;
+    } catch (error) {
+      this.logger.warn(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          threadId,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "读取 Codex native goal 失败，按未设置处理"
+      );
+      return undefined;
+    }
+  }
+
   private async executeGroupControlIntent(
     message: IncomingChatMessage,
     intent: GroupControlIntent,
@@ -1175,7 +1236,12 @@ export class ChatOrchestrator {
           }
         );
         return;
-      case "show_binding":
+      case "show_binding": {
+        const nativeGoal = await this.readNativeCodexGoalObjective(
+          message,
+          currentBindingResolution,
+          this.sessionStore.get(message.chatId)
+        );
         await this.sendTextNotice(
           message.chatId,
           currentBindingResolution.ok
@@ -1184,11 +1250,11 @@ export class ChatOrchestrator {
                 `CLI：${currentBindingResolution.cli}`,
                 `模式：${currentBindingResolution.executionMode}`,
                 `工作区：${currentBindingResolution.workspaceId}`,
-                `Goal：${this.sessionStore.get(message.chatId)?.goal ?? "未设置"}`
+                `Codex native goal：${currentBindingResolution.cli === "codex" ? nativeGoal ?? "未设置" : "当前不是 Codex 绑定"}`
               ].join("\n")
             : [
                 currentBindingResolution.detail,
-                `Goal：${this.sessionStore.get(message.chatId)?.goal ?? "未设置"}`
+                "Codex native goal：未设置"
               ].join("\n"),
           {
             messageId: message.messageId,
@@ -1197,6 +1263,7 @@ export class ChatOrchestrator {
           }
         );
         return;
+      }
       case "bind_workspace": {
         const result = await this.workspaceResolver.bindGroupWorkspace({
           chatId: message.chatId,
@@ -1327,29 +1394,179 @@ export class ChatOrchestrator {
       return;
     }
 
-    const updatedAt = new Date().toISOString();
-    this.sessionStore.save(
-      buildControlSessionPatch(
-        message,
-        this.sessionStore.get(message.chatId),
+    if (!currentBindingResolution.ok) {
+      await this.sendTextNotice(
+        message.chatId,
+        [currentBindingResolution.detail, "Codex native goal 需要先把这个群绑定到 Codex 工作区。"].join("\n"),
         {
-          goal: normalizedGoal,
-          goalUpdatedAt: updatedAt
-        },
-        this.defaultWorkspace,
-        updatedAt
-      )
-    );
+          messageId: message.messageId,
+          context: "发送 goal 设置结果失败",
+          ...replyMetadata
+        }
+      );
+      return;
+    }
+
+    if (currentBindingResolution.cli !== "codex") {
+      await this.sendTextNotice(
+        message.chatId,
+        `Codex native goal 只支持 Codex。当前群绑定的是 ${renderCliLabel(currentBindingResolution.cli)}，请先切到 Codex。`,
+        {
+          messageId: message.messageId,
+          context: "发送 goal 设置结果失败",
+          ...replyMetadata
+        }
+      );
+      return;
+    }
+
+    if (!this.codexWorker.runGoal) {
+      await this.sendTextNotice(message.chatId, "当前 Codex worker 不支持 native goal。", {
+        messageId: message.messageId,
+        context: "发送 goal 设置结果失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
+    const existingSession = this.sessionStore.get(message.chatId);
+    if (existingSession?.activeRunId) {
+      await this.sendTextNotice(message.chatId, "这个群当前有 Codex 任务正在运行，请等它结束后再设置 native goal。", {
+        messageId: message.messageId,
+        context: "发送 goal 设置结果失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
+    const observedAt = new Date().toISOString();
+    const initialSession = this.sessionStore.save({
+      chatId: message.chatId,
+      threadId: existingSession?.threadId ?? `pending:${message.chatId}:${Date.now()}`,
+      cli: "codex",
+      workspaceId: currentBindingResolution.workspaceId,
+      executionMode: currentBindingResolution.executionMode,
+      provider: currentBindingResolution.provider,
+      model: currentBindingResolution.model,
+      thinking: currentBindingResolution.thinking,
+      controlThreadId: existingSession?.controlThreadId,
+      controlReplyToMessageId: existingSession?.controlReplyToMessageId,
+      ...buildSessionMetadataPatch(message, existingSession, observedAt),
+      activeRunId: undefined,
+      activeTurnId: undefined,
+      updatedAt: observedAt
+    });
+
+    let threadId: string;
+    try {
+      threadId = await this.codexWorker.ensureThread({
+        session: initialSession,
+        cli: "codex",
+        workspaceId: currentBindingResolution.workspaceId,
+        executionMode: currentBindingResolution.executionMode,
+        provider: currentBindingResolution.provider,
+        model: currentBindingResolution.model,
+        thinking: currentBindingResolution.thinking,
+        message
+      });
+    } catch (error) {
+      await this.sendTextNotice(
+        message.chatId,
+        `无法恢复或创建 Codex thread，native goal 未设置：${error instanceof Error ? error.message : String(error)}`,
+        {
+          messageId: message.messageId,
+          context: "发送 goal 设置结果失败",
+          ...replyMetadata
+        }
+      );
+      return;
+    }
+
+    if (threadId !== initialSession.threadId) {
+      this.sessionStore.save({
+        ...initialSession,
+        threadId,
+        updatedAt: new Date().toISOString()
+      });
+    }
 
     await this.sendTextNotice(
       message.chatId,
-      ["已设置这个群的 goal。", `Goal：${normalizedGoal}`, renderGoalEffect(currentBindingResolution)].join("\n"),
+      [
+        "已调用 Codex native /goal 设置目标，并开始执行 goal turn。",
+        `Goal：${normalizedGoal}`,
+        `Thread：${threadId}`
+      ].join("\n"),
       {
         messageId: message.messageId,
         context: "发送 goal 设置结果失败",
         ...replyMetadata
       }
     );
+
+    const run = this.runStore.create({
+      chatId: message.chatId,
+      threadId,
+      sourceMessageId: message.messageId
+    });
+    this.sessionStore.attachRun(message.chatId, run.runId);
+
+    try {
+      await this.projectCodexEvents(
+        message,
+        run,
+        {
+          cli: "codex",
+          workspaceId: currentBindingResolution.workspaceId,
+          executionMode: currentBindingResolution.executionMode,
+          provider: currentBindingResolution.provider,
+          model: currentBindingResolution.model,
+          thinking: currentBindingResolution.thinking
+        },
+        this.codexWorker.runGoal({
+          session: this.sessionStore.get(message.chatId),
+          cli: "codex",
+          workspaceId: currentBindingResolution.workspaceId,
+          executionMode: currentBindingResolution.executionMode,
+          provider: currentBindingResolution.provider,
+          model: currentBindingResolution.model,
+          thinking: currentBindingResolution.thinking,
+          message,
+          threadId,
+          objective: normalizedGoal
+        })
+      );
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : "设置 Codex native goal 时发生未知错误";
+      const result = this.projector.apply(run.runId, {
+        kind: "error",
+        message: messageText
+      });
+      for (const item of result.items) {
+        this.deliveryService.schedule(item);
+      }
+      this.logger.error(
+        {
+          runId: run.runId,
+          chatId: message.chatId,
+          threadId,
+          error: messageText
+        },
+        "处理 Codex native goal 失败"
+      );
+    } finally {
+      await this.deliveryService.flushRun(run.runId).catch((error) => {
+        this.logger.error(
+          {
+            runId: run.runId,
+            chatId: message.chatId,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          "刷新 native goal run 对应的飞书消息失败"
+        );
+      });
+      this.sessionStore.releaseRun(message.chatId, run.runId);
+    }
   }
 
   private async handleClearGoalCommand(
@@ -1357,31 +1574,83 @@ export class ChatOrchestrator {
     currentBindingResolution: ChatWorkspaceResolution,
     replyMetadata: TextNoticeReplyMetadata
   ): Promise<void> {
-    const existingGoal = this.sessionStore.get(message.chatId)?.goal;
-    const updatedAt = new Date().toISOString();
-    this.sessionStore.save(
-      buildControlSessionPatch(
-        message,
-        this.sessionStore.get(message.chatId),
+    if (!currentBindingResolution.ok) {
+      await this.sendTextNotice(
+        message.chatId,
+        [currentBindingResolution.detail, "Codex native goal 需要先把这个群绑定到 Codex 工作区。"].join("\n"),
         {
-          goal: undefined,
-          goalUpdatedAt: updatedAt
-        },
-        this.defaultWorkspace,
-        updatedAt
-      )
-    );
+          messageId: message.messageId,
+          context: "发送 goal 清除结果失败",
+          ...replyMetadata
+        }
+      );
+      return;
+    }
+
+    if (currentBindingResolution.cli !== "codex") {
+      await this.sendTextNotice(
+        message.chatId,
+        `Codex native goal 只支持 Codex。当前群绑定的是 ${renderCliLabel(currentBindingResolution.cli)}，没有清除 ${renderCliLabel(currentBindingResolution.cli)} 上下文。`,
+        {
+          messageId: message.messageId,
+          context: "发送 goal 清除结果失败",
+          ...replyMetadata
+        }
+      );
+      return;
+    }
+
+    if (!this.codexWorker.clearGoal) {
+      await this.sendTextNotice(message.chatId, "当前 Codex worker 不支持 native goal clear。", {
+        messageId: message.messageId,
+        context: "发送 goal 清除结果失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
+    const existingSession = this.sessionStore.get(message.chatId);
+    const threadId = this.getNativeGoalThreadId(currentBindingResolution, existingSession);
+    if (!threadId) {
+      await this.sendTextNotice(message.chatId, "这个群当前还没有可清除 native goal 的 Codex thread。", {
+        messageId: message.messageId,
+        context: "发送 goal 清除结果失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
+    let cleared: boolean;
+    try {
+      cleared = await this.codexWorker.clearGoal({
+        session: existingSession,
+        cli: "codex",
+        workspaceId: currentBindingResolution.workspaceId,
+        executionMode: currentBindingResolution.executionMode,
+        provider: currentBindingResolution.provider,
+        model: currentBindingResolution.model,
+        thinking: currentBindingResolution.thinking,
+        message,
+        threadId
+      });
+    } catch (error) {
+      await this.sendTextNotice(
+        message.chatId,
+        `调用 Codex native /goal clear 失败：${error instanceof Error ? error.message : String(error)}`,
+        {
+          messageId: message.messageId,
+          context: "发送 goal 清除结果失败",
+          ...replyMetadata
+        }
+      );
+      return;
+    }
 
     await this.sendTextNotice(
       message.chatId,
-      existingGoal
-        ? [
-            "已清除这个群的 goal。",
-            currentBindingResolution.ok
-              ? "后续 Codex/Pi 任务不会再带这个 goal。"
-              : "这个群当前还没有可用工作区绑定。"
-          ].join("\n")
-        : "这个群当前没有设置 goal。",
+      cleared
+        ? "已调用 Codex native /goal clear 清除当前 thread 的 goal。"
+        : "Codex native /goal clear 已执行，但当前 thread 没有可清除的 goal。",
       {
         messageId: message.messageId,
         context: "发送 goal 清除结果失败",
@@ -1578,8 +1847,6 @@ export class ChatOrchestrator {
       provider: workspaceResolution.provider,
       model: workspaceResolution.model,
       thinking: workspaceResolution.thinking,
-      goal: existingSession?.goal,
-      goalUpdatedAt: existingSession?.goalUpdatedAt,
       controlThreadId: existingSession?.controlThreadId,
       controlReplyToMessageId: existingSession?.controlReplyToMessageId,
       ...buildSessionMetadataPatch(message, existingSession),

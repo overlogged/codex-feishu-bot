@@ -295,7 +295,7 @@ function renderScheduledTasks(tasks: ScheduledTaskRecord[]): string {
 
 function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupControlContext): string {
   const strippedMessage = stripMentions(message.text);
-  const currentGoal = context.goal?.trim() || "(未设置)";
+  const currentGoal = context.goal?.trim() || "(未设置或当前不是 Codex 绑定)";
   const currentBinding = context.currentBinding.configured
     ? [
         `已绑定，cli=${context.currentBinding.cli}`,
@@ -334,7 +334,7 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     '- {"kind":"resume_schedule","taskId":"<编号>"}',
     '- {"kind":"delete_schedule","taskId":"<编号>"}',
     '- {"kind":"new_session"}',
-    '- {"kind":"set_goal","goal":"<后续 Codex/Pi 任务要持续遵循的目标>"}',
+    '- {"kind":"set_goal","goal":"<Codex 原生 /goal 要持续推进的目标>"}',
     '- {"kind":"clear_goal"}',
     '- {"kind":"help","detail":"<给用户的简短说明>"}',
     "",
@@ -358,14 +358,14 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "- 如果用户说“新会话”“重开会话”，返回 new_session。",
     "- 如果用户说“设置 goal/目标/长期目标/当前目标 为 ...”，返回 set_goal，并把目标正文放进 goal。",
     "- 如果用户说“清除 goal/目标/长期目标/当前目标”，返回 clear_goal。",
-    "- goal 只影响后续 Codex 和 Pi 任务，不影响 Kimi 或 Claude。",
+    "- goal 指 Codex 原生 /goal 功能，只支持当前群绑定到 Codex 时执行；不要把它理解成普通 prompt 上下文。",
     "- 如果信息不足或不适合执行，返回 help。",
     "",
     `当前群 chatId: ${message.chatId}`,
     "当前群工作区绑定：",
     currentBinding,
     "",
-    "当前群 goal：",
+    "当前群 Codex native goal：",
     currentGoal,
     "",
     "可绑定工作区目录：",
