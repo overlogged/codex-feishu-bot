@@ -45,6 +45,11 @@ export type GroupControlIntent =
       prompt: string;
     }
   | {
+      kind: "create_one_time_schedule";
+      prompt: string;
+      runAt?: string;
+    }
+  | {
       kind: "update_schedule";
       taskId: string;
       cron?: string;
@@ -221,6 +226,12 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
         cron: requireString(parsed, "cron"),
         prompt: requireString(parsed, "prompt")
       };
+    case "create_one_time_schedule":
+      return {
+        kind,
+        prompt: requireString(parsed, "prompt"),
+        runAt: optionalString(parsed, "runAt")
+      };
     case "update_schedule": {
       const cron = optionalString(parsed, "cron");
       const prompt = optionalString(parsed, "prompt");
@@ -286,11 +297,22 @@ function renderScheduledTasks(tasks: ScheduledTaskRecord[]): string {
   }
 
   return tasks
-    .map(
-      (task) =>
-        `- ${task.taskId}: ${task.status} | cron=${task.cron} | prompt=${JSON.stringify(task.prompt)}`
-    )
+    .map((task) => {
+      const kind = task.kind === "once" ? "once" : "recurring";
+      const schedule = kind === "once" ? `runAt=${task.runAt ?? task.nextRunAt ?? "未计划"}` : `cron=${task.cron ?? "未设置"}`;
+      return `- ${task.taskId}: ${task.status} | ${kind} | ${schedule} | prompt=${JSON.stringify(task.prompt)}`;
+    })
     .join("\n");
+}
+
+function formatLocalDateTime(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  const second = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
 function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupControlContext): string {
@@ -329,6 +351,7 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|deepseek|ds","executionMode":"host|docker","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
+    '- {"kind":"create_one_time_schedule","prompt":"<任务内容>"[,"runAt":"<ISO 8601 时间>"]}',
     '- {"kind":"update_schedule","taskId":"<编号>","cron":"<可选 5段 cron>","prompt":"<可选 新任务内容>"}',
     '- {"kind":"pause_schedule","taskId":"<编号>"}',
     '- {"kind":"resume_schedule","taskId":"<编号>"}',
@@ -339,7 +362,10 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     '- {"kind":"help","detail":"<给用户的简短说明>"}',
     "",
     "规则：",
-    "- schedule 只支持循环 cron，不支持一次性“明天/两个小时后”。这类需求返回 help。",
+    "- create_schedule 只用于循环定时任务，必须返回 5 段 cron。",
+    "- 用户说“临时任务”“一次性任务”“只执行一次”“执行一次后删除”“某个时间点执行一次”时，返回 create_one_time_schedule。",
+    "- create_one_time_schedule 如果用户指定了时间，把自然语言或相对时间转成 ISO 8601 runAt；如果用户没有指定时间，省略 runAt，运行时会尽快执行一次。",
+    "- 解析相对时间时以当前时间（Asia/Shanghai）为基准。",
     "- 可以把自然语言时间转成 cron，例如“工作日早上 9 点” -> 0 9 * * 1-5。",
     "- 可以根据当前定时任务列表把“第一个/日报那条”解析成 taskId。",
     "- 一句话里可以同时包含多个配置动作、多个定时任务修改，或先查看再修改，请按顺序拆成 actions。",
@@ -360,6 +386,8 @@ function buildInterpreterPrompt(message: IncomingChatMessage, context: GroupCont
     "- 如果用户说“清除 goal/目标/长期目标/当前目标”，返回 clear_goal。",
     "- goal 指 Codex 原生 /goal 功能，只支持当前群绑定到 Codex 时执行；不要把它理解成普通 prompt 上下文。",
     "- 如果信息不足或不适合执行，返回 help。",
+    "",
+    `当前时间（Asia/Shanghai）：${formatLocalDateTime()}`,
     "",
     `当前群 chatId: ${message.chatId}`,
     "当前群工作区绑定：",

@@ -207,6 +207,21 @@ function createScheduleService(overrides: {
         ok: false;
         detail: string;
       };
+  createOneTimeTask?: (input: {
+    chatId: string;
+    runAt?: string;
+    prompt: string;
+    createdById?: string;
+    createdByName?: string;
+  }) =>
+    | {
+        ok: true;
+        task: ScheduledTaskRecord;
+      }
+    | {
+        ok: false;
+        detail: string;
+      };
   updateTask?: (input: {
     chatId: string;
     taskId: string;
@@ -275,6 +290,20 @@ function createScheduleService(overrides: {
     }) {
       return (
         overrides.createTask?.(input) ?? {
+          ok: false,
+          detail: "not implemented"
+        }
+      );
+    },
+    createOneTimeTask(input: {
+      chatId: string;
+      runAt?: string;
+      prompt: string;
+      createdById?: string;
+      createdByName?: string;
+    }) {
+      return (
+        overrides.createOneTimeTask?.(input) ?? {
           ok: false,
           detail: "not implemented"
         }
@@ -1493,6 +1522,120 @@ test("ChatOrchestrator creates a group scheduled task without starting a run", a
   });
   assert.equal(sentTexts.length, 1);
   assert.match(sentTexts[0] ?? "", /已创建这个群的定时任务 3/);
+  assert.match(sentTexts[0] ?? "", /工作区：\/home\/overlogged\/Quant/);
+});
+
+test("ChatOrchestrator creates a group one-time task without starting a run", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  let runTurnCalls = 0;
+  const sentTexts: string[] = [];
+  let createOneTimeTaskInput:
+    | {
+        chatId: string;
+        runAt?: string;
+        prompt: string;
+        createdById?: string;
+        createdByName?: string;
+      }
+    | undefined;
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_one_time_schedule_create";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({
+      async resolve() {
+        return {
+          ok: true,
+          workspaceId: "/home/overlogged/Quant",
+          cli: "codex",
+          executionMode: "host"
+        };
+      }
+    }),
+    createScheduleService({
+      createOneTimeTask(input) {
+        createOneTimeTaskInput = input;
+        return {
+          ok: true,
+          task: {
+            chatId: input.chatId,
+            taskId: "5",
+            kind: "once",
+            runAt: input.runAt,
+            prompt: input.prompt,
+            status: "enabled",
+            createdAt: "2026-07-01T09:00:00.000Z",
+            updatedAt: "2026-07-01T09:00:00.000Z",
+            nextRunAt: "2026-07-01T10:30:00.000Z",
+            createdById: input.createdById,
+            createdByName: input.createdByName
+          }
+        };
+      }
+    }),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret() {
+        return createControlResult({
+          kind: "create_one_time_schedule",
+          runAt: "2026-07-01T18:30:00+08:00",
+          prompt: "检查线上流水线"
+        });
+      }
+    })
+  );
+
+  orchestrator.enqueue(
+    createControlSession({
+      messageId: "om_group_schedule_once_1",
+      text: "@托帕 临时任务：今天 18:30 检查线上流水线"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(runStore.list().length, 0);
+  assert.deepEqual(createOneTimeTaskInput, {
+    chatId: "oc_group_1",
+    runAt: "2026-07-01T18:30:00+08:00",
+    prompt: "检查线上流水线",
+    createdById: "ou_user_1",
+    createdByName: "user-1"
+  });
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /已创建这个群的临时任务 5/);
+  assert.match(sentTexts[0] ?? "", /执行一次后会自动删除/);
   assert.match(sentTexts[0] ?? "", /工作区：\/home\/overlogged\/Quant/);
 });
 

@@ -226,6 +226,64 @@ test("CodexGroupControlAgent parses multiple actions from an actions array", asy
   assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
 });
 
+test("CodexGroupControlAgent interprets one-time schedule intents", async () => {
+  let lastPrompt = "";
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      lastPrompt = context.message.text;
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"create_one_time_schedule","runAt":"2026-07-01T18:30:00+08:00","prompt":"检查线上流水线"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 临时任务：今天 18:30 检查线上流水线"
+    }),
+    {
+      catalog: [],
+      scheduledTasks: [
+        {
+          chatId: "oc_group_1",
+          taskId: "1",
+          kind: "once",
+          runAt: "2026-07-01T10:30:00.000Z",
+          prompt: "旧临时任务",
+          status: "enabled",
+          createdAt: "2026-07-01T09:00:00.000Z",
+          updatedAt: "2026-07-01T09:00:00.000Z",
+          nextRunAt: "2026-07-01T10:30:00.000Z"
+        }
+      ],
+      currentBinding: {
+        configured: true,
+        cli: "codex",
+        executionMode: "host",
+        workspaceId: "/home/overlogged/Quant"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "create_one_time_schedule",
+      prompt: "检查线上流水线",
+      runAt: "2026-07-01T18:30:00+08:00"
+    }
+  ]);
+  assert.match(lastPrompt, /"kind":"create_one_time_schedule"/);
+  assert.match(lastPrompt, /当前时间（Asia\/Shanghai）/);
+  assert.match(lastPrompt, /once \| runAt=2026-07-01T10:30:00.000Z/);
+  assert.doesNotMatch(lastPrompt, /不支持一次性/);
+});
+
 test("CodexGroupControlAgent interprets goal control intents", async () => {
   let lastPrompt = "";
   const worker: CodexWorker = {

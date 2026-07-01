@@ -49,6 +49,14 @@ interface CreateScheduledTaskInput {
   createdByName?: string;
 }
 
+interface CreateOneTimeScheduledTaskInput {
+  chatId: string;
+  prompt: string;
+  runAt?: string;
+  createdById?: string;
+  createdByName?: string;
+}
+
 interface UpdateScheduledTaskInput {
   chatId: string;
   taskId: string;
@@ -66,6 +74,16 @@ type UpdateScheduledTaskResult =
       detail: string;
     };
 
+type ParseOneTimeRunAtResult =
+  | {
+      ok: true;
+      runAt: Date;
+    }
+  | {
+      ok: false;
+      detail: string;
+    };
+
 const CRON_FIELDS: CronFieldDefinition[] = [
   { name: "minute", min: 0, max: 59 },
   { name: "hour", min: 0, max: 23 },
@@ -75,6 +93,10 @@ const CRON_FIELDS: CronFieldDefinition[] = [
 ];
 
 const MAX_CRON_SEARCH_MINUTES = 60 * 24 * 366 * 5;
+
+export function getScheduledTaskKind(task: ScheduledTaskRecord): "recurring" | "once" {
+  return task.kind === "once" ? "once" : "recurring";
+}
 
 function normalizeDayOfWeek(value: number): number {
   return value === 7 ? 0 : value;
@@ -242,6 +264,96 @@ export function formatScheduleTime(value?: string): string {
   return `${year}-${month}-${day} ${hour}:${minute}`;
 }
 
+function parseLocalDateTime(value: string): Date | undefined {
+  const matched = value.match(
+    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/
+  );
+  if (!matched) {
+    return undefined;
+  }
+
+  const year = Number.parseInt(matched[1]!, 10);
+  const month = Number.parseInt(matched[2]!, 10);
+  const day = Number.parseInt(matched[3]!, 10);
+  const hour = matched[4] ? Number.parseInt(matched[4], 10) : 0;
+  const minute = matched[5] ? Number.parseInt(matched[5], 10) : 0;
+  const second = matched[6] ? Number.parseInt(matched[6], 10) : 0;
+  const date = new Date(year, month - 1, day, hour, minute, second, 0);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day ||
+    date.getHours() !== hour ||
+    date.getMinutes() !== minute ||
+    date.getSeconds() !== second
+  ) {
+    return undefined;
+  }
+
+  return date;
+}
+
+function parseOneTimeRunAt(raw: string | undefined, now: Date): ParseOneTimeRunAtResult {
+  if (!raw?.trim()) {
+    return {
+      ok: true,
+      runAt: now
+    };
+  }
+
+  const value = raw.trim();
+  const timeOnly = value.match(/^(\d{1,2}):(\d{2})$/);
+  let runAt: Date | undefined;
+  if (timeOnly) {
+    const hour = Number.parseInt(timeOnly[1]!, 10);
+    const minute = Number.parseInt(timeOnly[2]!, 10);
+    if (hour > 23 || minute > 59) {
+      runAt = undefined;
+    } else {
+      runAt = new Date(now);
+      runAt.setHours(hour, minute, 0, 0);
+      if (runAt.getTime() <= now.getTime()) {
+        runAt.setDate(runAt.getDate() + 1);
+      }
+    }
+  } else {
+    runAt = parseLocalDateTime(value);
+    if (!runAt) {
+      const parsed = new Date(value);
+      runAt = Number.isNaN(parsed.getTime()) ? undefined : parsed;
+    }
+  }
+
+  if (!runAt) {
+    return {
+      ok: false,
+      detail: "临时任务时间格式不正确。请使用 ISO 时间、YYYY-MM-DD HH:mm，或 HH:mm。"
+    };
+  }
+
+  if (runAt.getTime() < now.getTime()) {
+    return {
+      ok: false,
+      detail: "临时任务时间不能早于当前时间。"
+    };
+  }
+
+  return {
+    ok: true,
+    runAt
+  };
+}
+
+function getOneTimeNextRunAt(task: ScheduledTaskRecord, now: Date): Date {
+  const parsedRunAt = task.runAt ? new Date(task.runAt) : undefined;
+  if (parsedRunAt && !Number.isNaN(parsedRunAt.getTime()) && parsedRunAt.getTime() > now.getTime()) {
+    return parsedRunAt;
+  }
+
+  return now;
+}
+
 export class ChatScheduleService {
   private timer?: NodeJS.Timeout;
   private scanInFlight = false;
@@ -319,6 +431,7 @@ export class ChatScheduleService {
     const task: ScheduledTaskRecord = {
       chatId: input.chatId,
       taskId,
+      kind: "recurring",
       cron: parsed.normalized,
       prompt,
       status: "enabled",
@@ -327,6 +440,44 @@ export class ChatScheduleService {
       createdById: input.createdById,
       createdByName: input.createdByName,
       nextRunAt: nextRunAt.toISOString()
+    };
+    this.store.save(task);
+    return {
+      ok: true,
+      task
+    };
+  }
+
+  createOneTimeTask(input: CreateOneTimeScheduledTaskInput): UpdateScheduledTaskResult {
+    const prompt = input.prompt.trim();
+    if (!prompt) {
+      return {
+        ok: false,
+        detail: "临时任务内容不能为空。"
+      };
+    }
+
+    const now = this.now();
+    const parsedRunAt = parseOneTimeRunAt(input.runAt, now);
+    if (!parsedRunAt.ok) {
+      return parsedRunAt;
+    }
+
+    const nowIso = now.toISOString();
+    const runAtIso = parsedRunAt.runAt.toISOString();
+    const taskId = this.allocateTaskId(input.chatId);
+    const task: ScheduledTaskRecord = {
+      chatId: input.chatId,
+      taskId,
+      kind: "once",
+      runAt: runAtIso,
+      prompt,
+      status: "enabled",
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdById: input.createdById,
+      createdByName: input.createdByName,
+      nextRunAt: runAtIso
     };
     this.store.save(task);
     return {
@@ -352,6 +503,39 @@ export class ChatScheduleService {
       return {
         ok: false,
         detail: "定时任务内容不能为空。"
+      };
+    }
+
+    if (getScheduledTaskKind(task) === "once") {
+      const now = this.now();
+      if (input.cron !== undefined) {
+        return {
+          ok: false,
+          detail: "临时任务不能修改 cron。请删除后重新创建临时任务。"
+        };
+      }
+
+      const nextTask: ScheduledTaskRecord = {
+        ...task,
+        prompt: nextPrompt,
+        updatedAt: now.toISOString(),
+        nextRunAt:
+          task.status === "enabled"
+            ? task.nextRunAt ?? getOneTimeNextRunAt(task, now).toISOString()
+            : undefined,
+        lastError: task.status === "enabled" ? undefined : task.lastError
+      };
+      this.store.save(nextTask);
+      return {
+        ok: true,
+        task: nextTask
+      };
+    }
+
+    if (!task.cron) {
+      return {
+        ok: false,
+        detail: "这个定时任务缺少 cron，无法修改。请删除后重新创建。"
       };
     }
 
@@ -426,6 +610,29 @@ export class ChatScheduleService {
       };
     }
 
+    if (getScheduledTaskKind(task) === "once") {
+      const now = this.now();
+      const nextTask: ScheduledTaskRecord = {
+        ...task,
+        status: "enabled",
+        updatedAt: now.toISOString(),
+        nextRunAt: getOneTimeNextRunAt(task, now).toISOString(),
+        lastError: undefined
+      };
+      this.store.save(nextTask);
+      return {
+        ok: true,
+        task: nextTask
+      };
+    }
+
+    if (!task.cron) {
+      return {
+        ok: false,
+        detail: "这个定时任务缺少 cron，无法启用。请删除后重新创建。"
+      };
+    }
+
     const nextRunAt = getNextCronOccurrence(task.cron, this.now());
     if (!nextRunAt) {
       return {
@@ -480,6 +687,33 @@ export class ChatScheduleService {
   private ensureEnabledTasksHaveNextRunAt(): void {
     for (const task of this.store.list()) {
       if (task.status !== "enabled" || task.nextRunAt) {
+        continue;
+      }
+
+      if (getScheduledTaskKind(task) === "once") {
+        const now = this.now();
+        this.store.save({
+          ...task,
+          nextRunAt: getOneTimeNextRunAt(task, now).toISOString(),
+          updatedAt: now.toISOString()
+        });
+        continue;
+      }
+
+      if (!task.cron) {
+        this.logger?.warn(
+          {
+            chatId: task.chatId,
+            taskId: task.taskId
+          },
+          "定时任务缺少 cron，已暂停"
+        );
+        this.store.save({
+          ...task,
+          status: "paused",
+          updatedAt: this.now().toISOString(),
+          lastError: "定时任务缺少 cron"
+        });
         continue;
       }
 
@@ -550,6 +784,16 @@ export class ChatScheduleService {
 
       const latestTask = this.store.get(currentTask.chatId, currentTask.taskId);
       if (!latestTask || latestTask.status !== "enabled") {
+        return;
+      }
+
+      if (getScheduledTaskKind(latestTask) === "once") {
+        this.store.delete(latestTask.chatId, latestTask.taskId);
+        return;
+      }
+
+      if (!latestTask.cron) {
+        this.pauseTask(latestTask.chatId, latestTask.taskId, "定时任务缺少 cron");
         return;
       }
 

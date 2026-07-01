@@ -80,6 +80,76 @@ test("ChatScheduleService updates cron and prompt while preserving task identity
   assert.equal(updated.ok && updated.task.nextRunAt, "2026-04-06T10:30:00.000Z");
 });
 
+test("ChatScheduleService deletes one-time tasks after a successful trigger", async () => {
+  let now = new Date("2026-04-04T08:58:00+08:00");
+  const store = new ScheduledTaskStore();
+  const service = new ChatScheduleService(store, console, {
+    now: () => new Date(now),
+    tickMs: 5
+  });
+
+  const created = service.createOneTimeTask({
+    chatId: "oc_group_1",
+    runAt: "2026-04-04 09:00",
+    prompt: "检查线上流水线"
+  });
+
+  assert.equal(created.ok, true);
+  assert.equal(created.ok && created.task.kind, "once");
+  assert.equal(created.ok && created.task.runAt, "2026-04-04T01:00:00.000Z");
+  assert.equal(created.ok && created.task.nextRunAt, "2026-04-04T01:00:00.000Z");
+
+  now = new Date("2026-04-04T09:00:00+08:00");
+  const triggeredTaskIds: string[] = [];
+  service.start(async (task) => {
+    triggeredTaskIds.push(task.taskId);
+    return {
+      outcome: "triggered"
+    };
+  });
+
+  await sleep(30);
+  service.stop();
+
+  assert.deepEqual(triggeredTaskIds, ["1"]);
+  assert.equal(store.get("oc_group_1", "1"), undefined);
+});
+
+test("ChatScheduleService keeps one-time tasks when the active session is busy", async () => {
+  let now = new Date("2026-04-04T08:58:00+08:00");
+  const store = new ScheduledTaskStore();
+  const service = new ChatScheduleService(store, console, {
+    now: () => new Date(now),
+    tickMs: 5
+  });
+
+  const created = service.createOneTimeTask({
+    chatId: "oc_group_1",
+    runAt: "2026-04-04 09:00",
+    prompt: "忙时稍后再跑"
+  });
+
+  assert.equal(created.ok, true);
+  now = new Date("2026-04-04T09:00:00+08:00");
+  let triggerCalls = 0;
+  service.start(async () => {
+    triggerCalls += 1;
+    return {
+      outcome: "busy"
+    };
+  });
+
+  await sleep(30);
+  service.stop();
+
+  assert.ok(triggerCalls > 0);
+  const task = store.get("oc_group_1", "1");
+  assert.ok(task);
+  assert.equal(task.kind, "once");
+  assert.equal(task.status, "enabled");
+  assert.equal(task.nextRunAt, "2026-04-04T01:00:00.000Z");
+});
+
 test("ChatScheduleService retries busy tasks and pauses invalid tasks", async () => {
   let now = new Date("2026-04-04T09:00:00+08:00");
   const store = new ScheduledTaskStore();

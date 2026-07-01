@@ -14,6 +14,7 @@ import { SessionStore } from "../stores/session-store.js";
 import {
   ChatScheduleService,
   formatScheduleTime,
+  getScheduledTaskKind,
   type ScheduledTaskTriggerResult
 } from "./chat-schedule-service.js";
 import {
@@ -45,6 +46,11 @@ type ScheduleCommand =
       kind: "add";
       cron: string;
       prompt: string;
+    }
+  | {
+      kind: "add_once";
+      prompt: string;
+      runAt?: string;
     }
   | {
       kind: "update";
@@ -192,7 +198,41 @@ function parseScheduleCommand(message: IncomingChatMessage): ScheduleCommand | u
   if (/^(帮助|help)$/i.test(action)) {
     return {
       kind: "help",
-      detail: "请使用“定时任务 添加 <cron> | <任务内容>”或“定时任务 列表”。"
+      detail: "请使用“定时任务 添加 <cron> | <任务内容>”、“定时任务 临时 添加 <时间> | <任务内容>”或“定时任务 列表”。"
+    };
+  }
+
+  const oneTimeMatch = action.match(/^(临时任务|临时|一次性|一次任务|once)(?:\s+(?:添加|add))?(?:\s+(.+))?$/i);
+  if (oneTimeMatch) {
+    const payload = oneTimeMatch[2];
+    if (!payload) {
+      return {
+        kind: "help",
+        detail: "临时任务命令格式不对。请使用：定时任务 临时 添加 2026-07-01 18:30 | 检查线上状态"
+      };
+    }
+
+    const separatorIndex = payload.search(/\s*[|｜]\s*/);
+    if (separatorIndex < 0) {
+      return {
+        kind: "help",
+        detail: "临时任务命令格式不对。请使用：定时任务 临时 添加 2026-07-01 18:30 | 检查线上状态"
+      };
+    }
+
+    const runAt = payload.slice(0, separatorIndex).trim() || undefined;
+    const prompt = payload.slice(separatorIndex + 1).replace(/^[|｜]\s*/, "").trim();
+    if (!prompt) {
+      return {
+        kind: "help",
+        detail: "临时任务内容不能为空。请使用：定时任务 临时 添加 2026-07-01 18:30 | 检查线上状态"
+      };
+    }
+
+    return {
+      kind: "add_once",
+      runAt,
+      prompt
     };
   }
 
@@ -255,7 +295,7 @@ function parseScheduleCommand(message: IncomingChatMessage): ScheduleCommand | u
 
   return {
     kind: "help",
-    detail: "不支持这个定时任务命令。可用操作：列表、添加、暂停、启用、删除。"
+    detail: "不支持这个定时任务命令。可用操作：列表、添加、临时添加、暂停、启用、删除。"
   };
 }
 
@@ -263,10 +303,12 @@ function renderScheduleHelp(): string {
   return [
     "这个群支持这些定时任务命令：",
     "1. @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
-    "2. @机器人 定时任务 暂停 1",
-    "3. @机器人 定时任务 启用 1",
-    "4. @机器人 定时任务 删除 1",
-    "5. @机器人 定时任务",
+    "2. @机器人 临时任务：今天 18:30 检查线上流水线",
+    "3. @机器人 定时任务 临时 添加 2026-07-01 18:30 | 检查线上状态",
+    "4. @机器人 定时任务 暂停 1",
+    "5. @机器人 定时任务 启用 1",
+    "6. @机器人 定时任务 删除 1",
+    "7. @机器人 定时任务",
     "",
     "这些命令都会进入这个群自己的配置线程。",
     "也支持自然语言连着说多个动作，例如“暂停 1，再把 2 改成工作日 9 点发日报”。"
@@ -289,6 +331,7 @@ function renderControlHelp(defaultWorkspace: string): string {
     "8. 群里发 @机器人 设置 goal 为 每次先检查测试再改代码",
     "9. 群里发 @机器人 清除 goal",
     "10. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
+    "11. 群里发 @机器人 临时任务：今天 18:30 检查线上流水线",
     "",
     "也支持自然语言，比如“把这个群切到 docker 的 codex 12 号目录”“看看这个群现在绑到哪”。",
     "如果一句话里有多个配置动作，也会按顺序执行，比如“先暂停 1，再把 2 改成工作日 9 点发日报”。",
@@ -480,6 +523,14 @@ function buildControlSessionPatch(
   };
 }
 
+function renderScheduledTaskSchedule(task: ScheduledTaskRecord): string {
+  if (getScheduledTaskKind(task) === "once") {
+    return `临时 | ${formatScheduleTime(task.runAt ?? task.nextRunAt)}`;
+  }
+
+  return `循环 | ${task.cron ?? "未设置 cron"}`;
+}
+
 function renderScheduleList(tasks: ScheduledTaskRecord[]): string {
   if (tasks.length === 0) {
     return [renderScheduleHelp(), "", "这个群目前还没有定时任务。"].join("\n");
@@ -489,7 +540,7 @@ function renderScheduleList(tasks: ScheduledTaskRecord[]): string {
     "这个群当前的定时任务：",
     ...tasks.map((task) =>
       [
-        `${task.taskId}. ${task.status === "enabled" ? "启用" : "暂停"} | ${task.cron}`,
+        `${task.taskId}. ${task.status === "enabled" ? "启用" : "暂停"} | ${renderScheduledTaskSchedule(task)}`,
         `下次触发：${task.status === "enabled" ? formatScheduleTime(task.nextRunAt) : "已暂停"}`,
         `任务内容：${task.prompt}`,
         task.lastTriggeredAt ? `上次触发：${formatScheduleTime(task.lastTriggeredAt)}` : undefined,
@@ -1313,6 +1364,17 @@ export class ChatOrchestrator {
           replyMetadata
         );
         return;
+      case "create_one_time_schedule":
+        await this.handleScheduleCommand(
+          message,
+          {
+            kind: "add_once",
+            runAt: intent.runAt,
+            prompt: intent.prompt
+          },
+          replyMetadata
+        );
+        return;
       case "update_schedule":
         await this.handleScheduleCommand(
           message,
@@ -1707,7 +1769,7 @@ export class ChatOrchestrator {
       const content = result.ok
         ? [
           `已创建这个群的定时任务 ${result.task.taskId}。`,
-          `cron：${result.task.cron}`,
+          `cron：${result.task.cron ?? command.cron}`,
           `下次触发：${formatScheduleTime(result.task.nextRunAt)}`,
           `CLI：${routing.cli}`,
           `模式：${routing.executionMode}`,
@@ -1723,6 +1785,38 @@ export class ChatOrchestrator {
       return;
     }
 
+    if (command.kind === "add_once") {
+      const routing = await this.ensureGroupWorkspaceAvailable(message, replyMetadata);
+      if (!routing) {
+        return;
+      }
+
+      const result = this.scheduleService.createOneTimeTask({
+        chatId: message.chatId,
+        runAt: command.runAt,
+        prompt: command.prompt,
+        createdById: message.senderId,
+        createdByName: message.senderName
+      });
+      const content = result.ok
+        ? [
+            `已创建这个群的临时任务 ${result.task.taskId}。`,
+            `执行时间：${formatScheduleTime(result.task.nextRunAt)}`,
+            "执行一次后会自动删除。",
+            `CLI：${routing.cli}`,
+            `模式：${routing.executionMode}`,
+            `工作区：${routing.workspaceId}`,
+            `任务内容：${result.task.prompt}`
+          ].join("\n")
+        : [result.detail, "", renderScheduleHelp()].join("\n");
+      await this.sendTextNotice(message.chatId, content, {
+        messageId: message.messageId,
+        context: "发送临时任务创建结果失败",
+        ...replyMetadata
+      });
+      return;
+    }
+
     if (command.kind === "update") {
       const result = this.scheduleService.updateTask({
         chatId: message.chatId,
@@ -1733,7 +1827,7 @@ export class ChatOrchestrator {
       const content = result.ok
         ? [
             `已更新这个群的定时任务 ${result.task.taskId}。`,
-            `cron：${result.task.cron}`,
+            `计划：${renderScheduledTaskSchedule(result.task)}`,
             `状态：${result.task.status === "enabled" ? "启用中" : "已暂停"}`,
             `下次触发：${formatScheduleTime(result.task.nextRunAt)}`,
             `任务内容：${result.task.prompt}`
@@ -2063,6 +2157,18 @@ export class ChatOrchestrator {
   }
 
   private createScheduledTaskMessage(task: ScheduledTaskRecord): IncomingChatMessage {
+    const isOneTimeTask = getScheduledTaskKind(task) === "once";
+    const scheduleLines = isOneTimeTask
+      ? [
+          `这是群里的临时任务 ${task.taskId} 自动触发。`,
+          "这个任务执行一次后会自动删除。",
+          `计划时间：${formatScheduleTime(task.runAt ?? task.nextRunAt)}`
+        ]
+      : [
+          `这是群里的定时任务 ${task.taskId} 自动触发。`,
+          `cron：${task.cron ?? "未设置 cron"}`
+        ];
+
     return {
       chatId: task.chatId,
       chatType: "group",
@@ -2071,8 +2177,7 @@ export class ChatOrchestrator {
       senderName: "scheduler",
       senderType: "system",
       text: [
-        `这是群里的定时任务 ${task.taskId} 自动触发。`,
-        `cron：${task.cron}`,
+        ...scheduleLines,
         "",
         task.prompt
       ].join("\n"),

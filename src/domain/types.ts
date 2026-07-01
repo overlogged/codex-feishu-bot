@@ -43,11 +43,14 @@ export interface ChatSession {
 }
 
 export type ScheduledTaskStatus = "enabled" | "paused";
+export type ScheduledTaskKind = "recurring" | "once";
 
 export interface ScheduledTaskRecord {
   chatId: string;
   taskId: string;
-  cron: string;
+  kind?: ScheduledTaskKind;
+  cron?: string;
+  runAt?: string;
   prompt: string;
   status: ScheduledTaskStatus;
   createdAt: string;
