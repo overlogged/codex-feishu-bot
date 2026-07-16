@@ -58,6 +58,9 @@ const envSchema = z.object({
   CODEX_APP_SERVER_WS_TOKEN_FILE: optionalNonEmptyString,
   CODEX_APP_SERVER_MANAGED: envBoolean(false),
   CODEX_APP_SERVER_MODEL: z.string().default("gpt-5.4"),
+  CODEX_APP_SERVER_MODEL_REASONING_EFFORT: z
+    .enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+    .optional(),
   CODEX_APP_SERVER_APPROVAL_POLICY: z
     .enum(["untrusted", "on-failure", "on-request", "never"])
     .default("never"),

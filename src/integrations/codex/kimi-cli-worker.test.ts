@@ -10,7 +10,12 @@ import test from "node:test";
 
 import type { Env } from "../../config/env.js";
 import type { CodexEvent } from "../../domain/types.js";
-import { KimiCliWorker, type KimiCliRuntime, KimiWireTurnProjector } from "./kimi-cli-worker.js";
+import {
+  KimiCliWorker,
+  type KimiCliRuntime,
+  KimiWireTurnProjector,
+  normalizeKimiErrorMessage
+} from "./kimi-cli-worker.js";
 
 test("KimiWireTurnProjector streams think, tool, and final text events", () => {
   const projector = new KimiWireTurnProjector("turn_1");
@@ -197,6 +202,18 @@ test("KimiWireTurnProjector keeps commentary on error", () => {
         message: "Kimi Wire 会话执行失败。"
       }
     ]
+  );
+});
+
+test("normalizeKimiErrorMessage explains membership-benefit 402 errors", () => {
+  assert.equal(
+    normalizeKimiErrorMessage(
+      "Error code: 402 - {'error': {'message': \"We're unable to verify your membership benefits at this time. Please ensure your membership is active.\", 'type': 'invalid_request_error'}}"
+    ),
+    [
+      "Kimi CLI 上游返回 402：当前账号的会员权益校验未通过。",
+      "这个群当前走的是 Kimi CLI。请重新登录或续费 Kimi Code，或者把群绑定切到 codex 后重试。"
+    ].join("\n")
   );
 });
 

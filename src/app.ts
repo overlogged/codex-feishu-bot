@@ -238,6 +238,7 @@ export function buildAppRuntime(env: Env): AppRuntime {
           codexManaged: env.CODEX_APP_SERVER_MANAGED,
           codexListenUrl: env.CODEX_APP_SERVER_LISTEN_URL,
           codexModel: env.CODEX_APP_SERVER_MODEL,
+          codexModelReasoningEffort: env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
           feishuProvider: env.FEISHU_PROVIDER,
           feishuTransport: env.FEISHU_TRANSPORT,
           feishuDomain: env.FEISHU_DOMAIN,

@@ -420,6 +420,22 @@ function parsePromptResultError(result: unknown): string | undefined {
   return `Kimi turn 以异常状态结束：${result.status}`;
 }
 
+export function normalizeKimiErrorMessage(message: string | undefined): string | undefined {
+  const trimmed = message?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  if (/error code:\s*402/i.test(trimmed) && /membership benefits/i.test(trimmed)) {
+    return [
+      "Kimi CLI 上游返回 402：当前账号的会员权益校验未通过。",
+      "这个群当前走的是 Kimi CLI。请重新登录或续费 Kimi Code，或者把群绑定切到 codex 后重试。"
+    ].join("\n");
+  }
+
+  return trimmed;
+}
+
 function resolveKimiStateDir(): string {
   const home = process.env.HOME ?? "/home/overlogged";
   return join(home, ".kimi");
@@ -960,7 +976,7 @@ class KimiWireSession {
       const errorMessage = activeTurn.interrupted
         ? activeTurn.interruptionMessage ?? "当前任务已被中断。"
         : response.kind === "error"
-          ? response.error.message
+          ? normalizeKimiErrorMessage(response.error.message)
           : parsePromptResultError(response.result);
 
       for (const event of activeTurn.projector.finalize({
@@ -971,8 +987,9 @@ class KimiWireSession {
     } catch (error) {
       const fallback = this.stderr.trim() || "Kimi Wire 会话执行失败。";
       await this.stop();
+      const rawErrorMessage = error instanceof Error ? error.message || fallback : fallback;
       for (const event of activeTurn.projector.finalize({
-        errorMessage: error instanceof Error ? error.message || fallback : fallback
+        errorMessage: normalizeKimiErrorMessage(rawErrorMessage)
       })) {
         eventQueue.push(event);
       }

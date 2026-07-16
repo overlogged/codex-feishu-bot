@@ -299,6 +299,7 @@ export class CodexAppServerWorker implements CodexWorker {
           const response = await connection.request<ThreadResponse>("thread/resume", {
             threadId: context.session.threadId,
             model: this.env.CODEX_APP_SERVER_MODEL,
+            modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
             cwd: context.workspaceId,
             approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
             sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -337,6 +338,7 @@ export class CodexAppServerWorker implements CodexWorker {
       );
       const response = await connection.request<ThreadResponse>("thread/start", {
         model: this.env.CODEX_APP_SERVER_MODEL,
+        modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
         cwd: context.workspaceId,
         approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
         sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -549,6 +551,7 @@ export class CodexAppServerWorker implements CodexWorker {
     const response = await connection.request<ThreadResponse>("thread/resume", {
       threadId: context.threadId,
       model: this.env.CODEX_APP_SERVER_MODEL,
+      modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
       cwd: context.workspaceId,
       approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
       sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -590,6 +593,7 @@ export class CodexAppServerWorker implements CodexWorker {
           this.env.FEISHU_BRIDGE_SCRIPT
         ),
         model: this.env.CODEX_APP_SERVER_MODEL,
+        modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
         cwd: context.workspaceId,
         approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
         sandboxPolicy: {
@@ -679,6 +683,7 @@ export class CodexAppServerWorker implements CodexWorker {
           await resumedConnection.request<ThreadResponse>("thread/resume", {
             threadId: state.currentThreadId,
             model: this.env.CODEX_APP_SERVER_MODEL,
+            modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
             cwd: context.workspaceId,
             approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
             sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -839,6 +844,7 @@ export class CodexAppServerWorker implements CodexWorker {
         ? (
             await connection.request<ThreadResponse>("thread/start", {
               model: this.env.CODEX_APP_SERVER_MODEL,
+              modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
               cwd: context.workspaceId,
               approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
               sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -850,6 +856,7 @@ export class CodexAppServerWorker implements CodexWorker {
             await connection.request<ThreadResponse>("thread/resume", {
               threadId: context.threadId,
               model: this.env.CODEX_APP_SERVER_MODEL,
+              modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
               cwd: context.workspaceId,
               approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
               sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
