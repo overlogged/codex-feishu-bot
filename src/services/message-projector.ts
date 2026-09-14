@@ -17,6 +17,16 @@ function appendUnique(items: string[], value: string, limit: number): string[] {
 
 const MAX_DETAILS = 12;
 const MAX_FILES = 12;
+const COMMAND_DETAIL_PREFIX = "执行: ";
+
+function appendDetail(details: string[], value: string): string[] {
+  const base =
+    value.startsWith(COMMAND_DETAIL_PREFIX) &&
+    details[details.length - 1]?.startsWith(COMMAND_DETAIL_PREFIX)
+      ? details.slice(0, -1)
+      : details;
+  return appendUnique(base, value, MAX_DETAILS);
+}
 
 export class MessageProjector {
   constructor(
@@ -115,7 +125,7 @@ export class MessageProjector {
           phase: "streaming",
           output: event.output ?? current.output,
           details: event.detail
-            ? appendUnique(current.details, event.detail, MAX_DETAILS)
+            ? appendDetail(current.details, event.detail)
             : current.details,
           filePaths: event.path
             ? appendUnique(current.filePaths, event.path, MAX_FILES)

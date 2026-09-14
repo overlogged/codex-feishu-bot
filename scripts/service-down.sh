@@ -9,8 +9,10 @@ fi
 
 systemctl --user stop codex-feishu-bot-app.service || true
 systemctl --user stop codex-feishu-bot-codex.service || true
+systemctl --user stop codex-feishu-bot-auth-watch.service || true
 
 echo "stopped:"
 echo "  codex-feishu-bot-app.service"
 echo "  codex-feishu-bot-codex.service"
+echo "  codex-feishu-bot-auth-watch.service"
 

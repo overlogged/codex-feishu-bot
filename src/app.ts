@@ -8,13 +8,9 @@ import type { Env } from "./config/env.js";
 import { CodexAppServerWorker } from "./integrations/codex/app-server-worker.js";
 import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
-import { DockerCodexAppServerWorker } from "./integrations/codex/docker-codex-app-server-worker.js";
-import { DockerKimiCliWorker } from "./integrations/codex/docker-kimi-cli-worker.js";
-import { DockerPiCliWorker } from "./integrations/codex/docker-pi-cli-worker.js";
-import { ExecutionModeRoutedCodexWorker } from "./integrations/codex/execution-mode-routed-worker.js";
-import { KimiCliWorker } from "./integrations/codex/kimi-cli-worker.js";
+import { KimiAcpWorker } from "./integrations/codex/kimi-acp-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
-import { PiCliWorker } from "./integrations/codex/pi-cli-worker.js";
+import { PiCliWorker, PI_DS_FLASH_MODEL } from "./integrations/codex/pi-cli-worker.js";
 import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
 import { FakeFeishuMessageClient } from "./integrations/feishu/fake-feishu-message-client.js";
 import { FakeFeishuWsSubscriber } from "./integrations/feishu/fake-feishu-ws-subscriber.js";
@@ -50,37 +46,14 @@ interface LoggerLike {
   error(message: unknown, ...args: unknown[]): void;
 }
 
-class UnsupportedCodexWorker implements CodexWorker {
-  constructor(private readonly message: string) {}
-
-  async ensureThread(): Promise<string> {
-    throw new Error(this.message);
-  }
-
-  async *runTurn() {
-    throw new Error(this.message);
-  }
-}
-
 function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
   if (env.CODEX_MODE === "app-server") {
-    return new ExecutionModeRoutedCodexWorker(
-      new MultiCliWorker({
-        codex: new CodexAppServerWorker(env, logger),
-        claude: new ClaudeCliWorker(env, logger),
-        kimi: new KimiCliWorker(env, logger),
-        pi: new PiCliWorker(env, logger)
-      }),
-      new MultiCliWorker({
-        codex: new DockerCodexAppServerWorker(env, logger),
-        claude: new UnsupportedCodexWorker(
-          "docker 模式当前只支持 codex / kimi / pi。请把群绑定改回 host，或者切到 codex / kimi / pi。"
-        ),
-        kimi: new DockerKimiCliWorker(env, logger),
-        pi: new DockerPiCliWorker(env, logger)
-      }),
-      logger
-    );
+    return new MultiCliWorker({
+      codex: new CodexAppServerWorker(env, logger),
+      claude: new ClaudeCliWorker(env, logger),
+      kimi: new KimiAcpWorker(env, logger),
+      pi: new PiCliWorker(env, logger)
+    });
   }
 
   return new MockCodexWorker();
@@ -147,7 +120,8 @@ export function buildAppRuntime(env: Env): AppRuntime {
     feishuClient,
     conversationStore,
     env.LIVE_UPDATE_DEBOUNCE_MS,
-    app.log
+    app.log,
+    (item) => sessionStore.get(item.chatId)?.toolCardsEnabled === true
   );
   const scheduleService = new ChatScheduleService(scheduledTaskStore, app.log);
   const projector = new MessageProjector(runStore, conversationStore);
@@ -155,7 +129,9 @@ export function buildAppRuntime(env: Env): AppRuntime {
   const groupControlAgent = new CodexGroupControlAgent(
     codexWorker,
     env.DEFAULT_WORKSPACE,
-    app.log
+    app.log,
+    "pi",
+    PI_DS_FLASH_MODEL
   );
   const orchestrator = new ChatOrchestrator(
     sessionStore,
@@ -169,7 +145,13 @@ export function buildAppRuntime(env: Env): AppRuntime {
     scheduleService,
     env.DEFAULT_WORKSPACE,
     app.log,
-    groupControlAgent
+    groupControlAgent,
+    {
+      codex: "codex",
+      kimi: env.KIMI_ACP_COMMAND,
+      claude: env.CLAUDE_CLI_COMMAND,
+      pi: env.PI_CLI_COMMAND
+    }
   );
   const agentManager = new AgentManagerService(
     env.DEFAULT_WORKSPACE,

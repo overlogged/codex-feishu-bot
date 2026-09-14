@@ -11,7 +11,8 @@ fi
 
 systemctl --user --no-pager --full status \
   codex-feishu-bot-codex.service \
-  codex-feishu-bot-app.service || true
+  codex-feishu-bot-app.service \
+  codex-feishu-bot-auth-watch.service || true
 
 echo
 "${ROOT_DIR}/scripts/host-smoke.sh" || true

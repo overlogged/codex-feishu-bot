@@ -1,6 +1,6 @@
 # Codex Feishu Bot
 
-把 `codex app-server` 接到飞书群聊，并把“创建飞书应用、开事件订阅、补权限、发布版本、Docker 部署”这整套流程尽量交给用户自己的 Codex 自动完成。
+把 `codex app-server` 接到飞书群聊，并把“创建飞书应用、开事件订阅、补权限、发布版本、宿主机启动”这整套流程尽量交给用户自己的 Codex 自动完成。
 
 这个仓库的主路径不是“用户自己看文档手点控制台”，而是：
 
@@ -20,11 +20,11 @@
 - 补齐 IM 相关权限
 - 发布版本
 - 把 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 写回 `.env.real`
-- 用 Docker 起单个 `app` 服务
+- 在宿主机启动 `codex app-server` 和 `app` 服务
 - 跑健康检查和 smoke check
 
-默认情况下，运行时 `Codex` 看到的工作目录是单独挂载的 `/workspace`，不是这个仓库本身。给用户的导出文件会写到这个运行时工作目录下的 `artifacts/`，宿主机默认对应 `.codex-local/workspace/artifacts/`。
-聊天运行态快照也会写到工作目录下的 `.codex-feishu-bot/runtime-state.json`，因此容器重启后仍能保留 `chat -> thread` 映射和最近消息投影；但重启前未完成的 run 会被标记为已中断，不会继续占着 active turn。服务重启完成后，机器人会自动在受影响的群里发一条提示，告诉用户可以直接回复“继续”。
+默认情况下，运行时 `Codex` 看到的工作目录是 `DEFAULT_WORKSPACE`（默认 `/home/overlogged`），不是这个仓库本身。给用户的导出文件会写到这个工作目录下的 `.codex-feishu-bot/artifacts/`。
+聊天运行态快照也会写到工作目录下的 `.codex-feishu-bot/runtime-state.json`，因此服务重启后仍能保留 `chat -> thread` 映射和最近消息投影；但重启前未完成的 run 会被标记为已中断，不会继续占着 active turn。服务重启完成后，机器人会自动在受影响的群里发一条提示，告诉用户可以直接回复“继续”。
 
 ## 用户还需要做什么
 
@@ -43,7 +43,6 @@
 建议环境：
 
 - macOS 或 Linux
-- Docker / OrbStack
 - Node.js 22+
 - `pnpm`
 - Google Chrome
@@ -54,7 +53,7 @@
 把这段 prompt 直接贴给 Codex：
 
 ```text
-打开这个仓库后，严格按照 README.md、AGENTS.md、docs/codex-bootstrap-playbook.md、docs/feishu-console-automation.md 执行，不要把普通的控制台配置步骤推回给我。先运行 pnpm install、pnpm bootstrap:env、pnpm chrome:debug。然后先明确问我一个问题：是否要创建新的机器人。如果我回答“要”，就异步执行 `npx -y lark-op-cli@latest create-bot --name "Codex 机器人"` 并持续读取输出；如果过程中出现扫码登录，请把 ASCII 二维码原样转发给我。如果我回答“不要”，再确认我是否已经登录飞书开放平台或 OpenAI/Codex；如果我没登录，再停下来让我登录。登录完成后，就继续走原来的浏览器和 agent-browser / Chrome CDP 方案，只选择已有机器人并完成后续配置，不要再创建新的机器人。拿到 FEISHU_APP_ID 和 FEISHU_APP_SECRET 后写回 .env.real，然后在宿主机运行 `pnpm codex:host`、`pnpm build:host`、`pnpm start`，再用 `pnpm host:smoke` 验证服务，最后告诉我怎么在飞书里测试。群聊工作区绑定必须通过私聊机器人发送“工作区”获取编号，再回群里 `@机器人 编号`、`@机器人 docker 编号`，或用自然语言完成绑定。
+打开这个仓库后，严格按照 README.md、AGENTS.md、docs/codex-bootstrap-playbook.md、docs/feishu-console-automation.md 执行，不要把普通的控制台配置步骤推回给我。先运行 pnpm install、pnpm bootstrap:env、pnpm chrome:debug。然后先明确问我一个问题：是否要创建新的机器人。如果我回答“要”，就异步执行 `npx -y lark-op-cli@latest create-bot --name "Codex 机器人"` 并持续读取输出；如果过程中出现扫码登录，请把 ASCII 二维码原样转发给我。如果我回答“不要”，再确认我是否已经登录飞书开放平台或 OpenAI/Codex；如果我没登录，再停下来让我登录。登录完成后，就继续走原来的浏览器和 agent-browser / Chrome CDP 方案，只选择已有机器人并完成后续配置，不要再创建新的机器人。拿到 FEISHU_APP_ID 和 FEISHU_APP_SECRET 后写回 .env.real，然后在宿主机运行 `pnpm codex:host`、`pnpm build:host`、`pnpm start`，再用 `pnpm host:smoke` 验证服务，最后告诉我怎么在飞书里测试。群聊工作区绑定必须通过私聊机器人发送“工作区”获取编号，再回群里 `@机器人 编号`，或用自然语言完成绑定。
 ```
 
 同样的 prompt 也单独放在 [docs/codex-bootstrap-prompt.md](docs/codex-bootstrap-prompt.md)。
@@ -124,41 +123,28 @@ pnpm host:smoke
 
 默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的一级子目录，不能直接把仓库根目录当运行工作区。
 
-## 按群执行模式
+## 按群绑定
 
-每个群的绑定现在同时决定三件事：
+每个群的绑定会决定：
 
 - 目录编号
 - CLI 类型
-- 执行模式
+- Codex 模型与思考深度（使用 Codex 时）
 
-默认是 `host` 模式，也就是裸机直接运行。群里如果没特别指定，就按 `host` 处理。
-
-如果群绑定成 `docker` 模式：
-
-- 当前支持 `codex` / `kimi` / `pi`
-- `claude` 目前只支持 `host` 裸金属模式
-- `codex` 仍然走同一套 `codex app-server` 协议
-- `kimi` 直接在运行镜像里执行容器化 CLI，并使用官方 `--wire` 协议模式复用长驻会话
-- `pi` 直接在运行镜像里执行容器化 CLI，默认走 OpenRouter 的 DeepSeek V4 Pro，消息或绑定里指定 `DS4 Flash` / `V4 Flash` 时会切到 DeepSeek V4 Flash
-- 使用仓库当前的运行镜像 `codex-feishu-bot-session:local`
-- 运行镜像默认基于 Ubuntu 24.04，并对齐宿主机的 Node 24.14.0 / Codex CLI 0.133.0，优先解决宿主机编译产物在容器里的 glibc 兼容问题
-- 把宿主机 `/home` 原样映射进容器里的 `/home`
-- CPU 限制为本机可用核心数的一半
-- 内存限制为 `100g`
-- 这个群的 session 仍然由宿主机上的 `app` 进程统一编排，所以 `agent-manager`、`/debug/state` 和 `codex-feishu-agent list` 都能看到它
+所有会话都在宿主机裸机直接运行。
+Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-5.6-sol`，并显式指定 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`。
 
 常见绑定方式：
 
 - 私聊机器人发 `工作区`
 - 回到群里发 `@机器人 12`
 - 或 `@机器人 claude 12`
-- 或 `@机器人 docker 12`
-- 或 `@机器人 docker kimi 12`
-- 或 `@机器人 docker pi 12`
-- 或 `@机器人 docker pi ds4 flash 12`
+- 或 `@机器人 codex GPT6 high 12`
+- 或 `@机器人 codex 5.6 Sol xhigh 12`
+- 或 `@机器人 kimi 12`
 - 或 `@机器人 pi 12`
-- 或自然语言，例如 `@机器人 把这个群切到 docker 模式的 12 号目录`
+- 或 `@机器人 pi ds4 flash 12`
+- 或自然语言，例如 `@机器人 把这个群切到 12 号目录`
 
 ## 后台运行
 
@@ -221,37 +207,8 @@ pnpm bootstrap:env
 - `CHAT_WORKSPACE_BINDINGS_FILE`
 - `CODEX_ARTIFACTS_DIR`
 - `RUNTIME_STATE_FILE`
-- `DOCKER_EXECUTION_IMAGE`
-- `DOCKER_EXECUTION_CONTAINER_NAME`
-- `DOCKER_EXECUTION_LISTEN_URL`
-- `DOCKER_EXECUTION_MEMORY`
-- `DOCKER_EXECUTION_GPU`
-- `DOCKER_EXECUTION_MOUNT_ROOT`
-- `DOCKER_EXECUTION_MOUNTS`
 
 推荐优先让 Codex 检查宿主机是否已经存在 `~/.codex/auth.json`。如果存在，就把 `CODEX_HOME_SOURCE` 改成这个宿主机绝对路径；只有在本机没有 Codex 登录态时，才退回 `OPENAI_API_KEY`。
-
-## QuantDev 保护 Docker
-
-quantdev 专用 session 镜像使用 `quantdev-runtime` 构建目标。它按以前的 Docker 模式全量映射 `/home`，因此 `QuantDev`、git/Codex/Kimi/slock 鉴权状态和其他用户目录都可见；同时用子挂载把 `/home/overlogged/QuantFS/common_data` 和 `/home/overlogged/QuantFS/prod` 覆盖成只读。`QuantFS/dev` 和其他未特殊保护目录仍随 `/home` 映射保持可写。
-
-这个容器是常驻执行池，不是随用随起的临时容器。`codex + docker` 连接同一个容器里的 `codex app-server`，`kimi + docker` 也通过 `docker exec` 进入同一个容器执行，`slock` daemon 由 entrypoint 在这个容器里后台运行。默认 CPU 和内存限制都按宿主机一半计算。
-
-`DOCKER_EXECUTION_GPU=auto` 会自动给 WSL GPU 环境挂载 `/dev/dxg` 和 `/usr/lib/wsl`，让容器内能找到 `nvidia-smi`、`libcuda.so` 和 NVML；普通 NVIDIA Container Toolkit 环境则使用 `--gpus all`。如果机器不应该暴露 GPU，可以设为 `off`。
-
-常用命令：
-
-```bash
-pnpm quantdev:docker:build
-pnpm quantdev:service:install:user
-systemctl --user enable --now codex-feishu-bot-quantdev-docker.service
-```
-
-`SLOCK_API_KEY` 放在 `.env.real`，不要写进可提交文件。容器启动时 entrypoint 会后台运行：
-
-```bash
-npx -y @slock-ai/daemon@latest --server-url "$SLOCK_SERVER_URL" --api-key "$SLOCK_API_KEY"
-```
 
 `.env.real.example` 里对每一项都有注释。
 
@@ -294,24 +251,27 @@ cp .env.example .env
 pnpm dev
 ```
 
-但这条路径只适合写代码，不是推荐的集成验证路径。真实联调、验收和排查默认都走 Docker。
+但这条路径只适合写代码，不是推荐的集成验证路径。真实联调、验收和排查默认都走宿主机 `pnpm start`。
 
 ## Fake Feishu 联调
 
 仓库仍保留 fake Feishu 环境，适合纯本地联调：
 
 ```bash
-pnpm docker:fake:up
+pnpm fake-feishu &
+pnpm dev
 curl -X POST http://localhost:3400/fake/events/message \
   -H 'content-type: application/json' \
   -d '{
-    "chatId": "oc_demo_docker",
-    "messageId": "om_demo_docker_1",
-    "text": "帮我总结一下当前 Docker 联调链路",
+    "chatId": "oc_demo_local",
+    "messageId": "om_demo_local_1",
+    "text": "帮我总结一下当前联调链路",
     "mentionsBot": true
   }'
 curl http://localhost:3400/fake/state
 ```
+
+fake Feishu 只提供 HTTP/WS 模拟（`scripts/fake-feishu-server.mjs`），不依赖额外服务。
 
 ## 注意事项
 
@@ -319,7 +279,6 @@ curl http://localhost:3400/fake/state
 - 用户可见导出文件默认会落到 `.codex-local/workspace/artifacts/`，这是预期行为，不是源码目录
 - 运行时用户可见的文件必须通过飞书 API 发布，工作空间文件默认只有 Codex 自己可见
 - 这套仓库默认不会为用户申请不存在的“飞书开发者平台管理 API”；平台配置路径是浏览器自动化
-- 对外只有单容器部署，不再提供双容器 sidecar 运行模式
 
 ## License
 

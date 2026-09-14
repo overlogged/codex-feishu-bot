@@ -172,7 +172,72 @@ test("ConversationDeliveryService serializes concurrent flushes for the same ite
   assert.deepEqual(calls, ["sendCard"]);
 });
 
-test("ConversationDeliveryService does not send tool cards to Feishu", async () => {
+test("ConversationDeliveryService sends tool cards and updates them in place", async () => {
+  const calls: string[] = [];
+  const conversationStore = new ConversationStore();
+  const service = new ConversationDeliveryService(
+    {
+      sendText: async () => {
+        calls.push("sendText");
+        return "om_text_1";
+      },
+      updateText: async () => {
+        calls.push("updateText");
+      },
+      sendCard: async () => {
+        calls.push("sendCard");
+        return "om_card_tool_1";
+      },
+      updateCard: async () => {
+        calls.push("updateCard");
+      },
+      sendFile: async () => {
+        calls.push("sendFile");
+        return "om_file_1";
+      }
+    },
+    conversationStore,
+    1,
+    console,
+    () => true
+  );
+
+  conversationStore.save(
+    createItem({
+      itemId: "tool_1",
+      kind: "tool_card",
+      source: "tool",
+      phase: "streaming",
+      title: "执行命令",
+      command: "pnpm test",
+      details: ["执行: pnpm test"]
+    })
+  );
+  await service.flush("run_1", "tool_1");
+
+  conversationStore.update("run_1", "tool_1", {
+    phase: "streaming",
+    output: "running 10 tests"
+  });
+  await service.flush("run_1", "tool_1");
+
+  conversationStore.update("run_1", "tool_1", {
+    phase: "completed",
+    output: "10 tests passed"
+  });
+  await service.flush("run_1", "tool_1");
+
+  assert.deepEqual(calls, ["sendCard", "updateCard", "updateCard"]);
+
+  const stored = conversationStore.get("run_1", "tool_1");
+  assert.equal(stored?.feishuMessageId, "om_card_tool_1");
+
+  // Same content should not trigger another update.
+  await service.flush("run_1", "tool_1");
+  assert.deepEqual(calls, ["sendCard", "updateCard", "updateCard"]);
+});
+
+test("ConversationDeliveryService does not send tool cards without the opt-in flag", async () => {
   const calls: string[] = [];
   const conversationStore = new ConversationStore();
   const service = new ConversationDeliveryService(
@@ -208,7 +273,74 @@ test("ConversationDeliveryService does not send tool cards to Feishu", async () 
       source: "tool",
       phase: "completed",
       title: "执行命令",
+      command: "pnpm test",
       output: "done"
+    })
+  );
+  await service.flush("run_1", "tool_1");
+
+  assert.deepEqual(calls, []);
+
+  const optedInCalls: string[] = [];
+  const optedIn = new ConversationDeliveryService(
+    {
+      sendText: async () => "om_text_1",
+      updateText: async () => undefined,
+      sendCard: async () => {
+        optedInCalls.push("sendCard");
+        return "om_card_tool_1";
+      },
+      updateCard: async () => {
+        optedInCalls.push("updateCard");
+      },
+      sendFile: async () => "om_file_1"
+    },
+    conversationStore,
+    1,
+    console,
+    () => true
+  );
+  await optedIn.flush("run_1", "tool_1");
+
+  assert.deepEqual(optedInCalls, ["sendCard"]);
+});
+
+test("ConversationDeliveryService skips queued tool cards", async () => {
+  const calls: string[] = [];
+  const conversationStore = new ConversationStore();
+  const service = new ConversationDeliveryService(
+    {
+      sendText: async () => {
+        calls.push("sendText");
+        return "om_text_1";
+      },
+      updateText: async () => {
+        calls.push("updateText");
+      },
+      sendCard: async () => {
+        calls.push("sendCard");
+        return "om_card_1";
+      },
+      updateCard: async () => {
+        calls.push("updateCard");
+      },
+      sendFile: async () => {
+        calls.push("sendFile");
+        return "om_file_1";
+      }
+    },
+    conversationStore,
+    1,
+    console
+  );
+
+  conversationStore.save(
+    createItem({
+      itemId: "tool_1",
+      kind: "tool_card",
+      source: "tool",
+      phase: "queued",
+      title: "执行命令"
     })
   );
 

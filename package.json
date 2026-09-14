@@ -23,20 +23,7 @@
     "service:up": "./scripts/service-up.sh",
     "service:down": "./scripts/service-down.sh",
     "service:status": "./scripts/service-status.sh",
-    "fake-feishu": "node scripts/fake-feishu-server.mjs",
-    "docker:up": "./scripts/docker.sh up --build -d",
-    "docker:down": "./scripts/docker.sh down -v",
-    "docker:ps": "./scripts/docker.sh ps",
-    "docker:logs": "./scripts/docker.sh logs -f app",
-    "docker:restart": "./scripts/docker.sh restart app",
-    "docker:exec:app": "./scripts/docker.sh exec app sh",
-    "docker:smoke": "./scripts/docker-smoke.sh",
-    "quantdev:docker:build": "./scripts/build-quantdev-image.sh",
-    "quantdev:docker:up": "./scripts/start-quantdev-docker.sh",
-    "quantdev:service:install:user": "./scripts/install-quantdev-docker-service.sh",
-    "docker:fake:up": "docker compose -f docker-compose.fake.yml up --build -d",
-    "docker:fake:down": "docker compose -f docker-compose.fake.yml down -v",
-    "docker:fake:logs": "docker compose -f docker-compose.fake.yml logs -f app fake-feishu"
+    "fake-feishu": "node scripts/fake-feishu-server.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",

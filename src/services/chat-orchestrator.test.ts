@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type {
@@ -80,7 +83,6 @@ function createWorkspaceResolver(
         ok: true,
         workspaceId: input.session?.workspaceId ?? "/workspace",
         cli: input.session?.cli ?? "codex",
-        executionMode: input.session?.executionMode ?? "host"
       };
     },
     async listCatalog() {
@@ -125,7 +127,8 @@ function createGroupControlAgent(
               detail: "unsupported in test"
             }
           ],
-          threadId: "thread_control_default"
+          threadId: "thread_control_default",
+          cli: "codex"
         }
       );
     }
@@ -138,7 +141,8 @@ function createControlResult(
 ) {
   return {
     intents: Array.isArray(intent) ? intent : [intent],
-    threadId
+    threadId,
+    cli: "codex" as const
   };
 }
 
@@ -183,7 +187,6 @@ function createBoundWorkspaceResolver() {
         ok: true,
         workspaceId: "/home/overlogged/Quant",
         cli: "codex",
-        executionMode: "host"
       };
     }
   });
@@ -521,7 +524,6 @@ test("ChatOrchestrator interrupts the active Kimi turn and runs the latest messa
     threadId: "thread_kimi_1",
     cli: "kimi",
     workspaceId: "/workspace",
-    executionMode: "docker",
     activeRunId: "run_active",
     activeTurnId: "turn_kimi_active_1",
     updatedAt: new Date().toISOString()
@@ -819,6 +821,335 @@ test("ChatOrchestrator keeps the stored private-chat display name when a system 
   assert.equal(session?.lastUserMessagePreview, "请帮我继续跟进昨天的任务");
 });
 
+test("ChatOrchestrator toggles tool card delivery per session with the 工具卡片 command", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+
+  sessionStore.save({
+    chatId: "oc_p2p_1",
+    chatType: "p2p",
+    threadId: "thread_p2p_1",
+    cli: "codex",
+    workspaceId: "/home/overlogged",
+    updatedAt: new Date().toISOString()
+  });
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      return undefined;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_tool_cards";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({}),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_1",
+      chatType: "p2p",
+      messageId: "om_tool_cards_status_1",
+      text: "工具卡片"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(sentTexts[0] ?? "", /当前是关闭状态/);
+  assert.equal(sessionStore.get("oc_p2p_1")?.toolCardsEnabled, undefined);
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_1",
+      chatType: "p2p",
+      messageId: "om_tool_cards_on_1",
+      text: "工具卡片 开"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sessionStore.get("oc_p2p_1")?.toolCardsEnabled, true);
+  assert.match(sentTexts[1] ?? "", /已为这个会话开启工具卡片推送/);
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_1",
+      chatType: "p2p",
+      messageId: "om_tool_cards_off_1",
+      text: "工具卡片 关"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sessionStore.get("oc_p2p_1")?.toolCardsEnabled, false);
+  assert.match(sentTexts[2] ?? "", /已为这个会话关闭工具卡片推送/);
+});
+
+test("ChatOrchestrator asks for a session before setting the tool cards switch", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      return undefined;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_tool_cards";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({}),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_new",
+      chatType: "p2p",
+      messageId: "om_tool_cards_on_new",
+      text: "工具卡片 开"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(sessionStore.get("oc_p2p_new"), undefined);
+  assert.match(sentTexts[0] ?? "", /先绑定工作区或先聊一句/);
+});
+
+test("ChatOrchestrator interrupts a Kimi turn that is blocked on a background wait and runs the latest message", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  runStore.save({
+    runId: "run_active",
+    chatId: "oc_group_1",
+    threadId: "thread_kimi_1",
+    sourceMessageId: "om_original_1",
+    status: "running",
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  sessionStore.save({
+    chatId: "oc_group_1",
+    threadId: "thread_kimi_1",
+    cli: "kimi",
+    workspaceId: "/workspace",
+    activeRunId: "run_active",
+    activeTurnId: "turn_kimi_active_1",
+    updatedAt: new Date().toISOString()
+  });
+
+  let steerCalls = 0;
+  let interruptCalls = 0;
+  let runTurnCalls = 0;
+  const codexWorker: CodexWorker = {
+    supportsSteer() {
+      return true;
+    },
+    async ensureThread() {
+      return "thread_kimi_1";
+    },
+    async steerTurn() {
+      steerCalls += 1;
+      throw Object.assign(new Error("Kimi 当前回合正阻塞在等待后台任务。"), {
+        code: "KIMI_TURN_BLOCKED_WAIT"
+      });
+    },
+    async interruptTurn(context) {
+      interruptCalls += 1;
+      assert.equal(context.turnId, "turn_kimi_active_1");
+      assert.equal(context.interruptionMessage, "当前任务已被后续消息中断。");
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+      assert.equal(context.message.messageId, "om_group_kimi_blocked_1");
+      yield {
+        kind: "thread_bound",
+        threadId: "thread_kimi_1"
+      };
+      yield {
+        kind: "turn_bound",
+        turnId: "turn_kimi_replacement_1"
+      };
+      yield {
+        kind: "run_status",
+        status: "completed"
+      };
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient(),
+    createNoopDeliveryService(),
+    projector,
+    codexWorker,
+    createWorkspaceResolver(),
+    createScheduleService(),
+    "/workspace",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      messageId: "om_group_kimi_blocked_1",
+      text: "怎么样了"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(steerCalls, 1);
+  assert.equal(interruptCalls, 1);
+  assert.equal(runTurnCalls, 1);
+  assert.equal(runStore.get("run_active")?.status, "failed");
+  assert.equal(runStore.get("run_active")?.errorMessage, "当前任务已被后续消息中断。");
+  assert.equal(runStore.list().length, 2);
+  assert.equal(runStore.list()[1]?.sourceMessageId, "om_group_kimi_blocked_1");
+});
+
+for (const cli of ["pi", "claude"] as const) {
+  test(`ChatOrchestrator interrupts the active ${cli} turn and runs the latest message`, async () => {
+    const sessionStore = new SessionStore();
+    const runStore = new RunStore();
+    const conversationStore = new ConversationStore();
+    const projector = new MessageProjector(runStore, conversationStore);
+    runStore.save({
+      runId: "run_active",
+      chatId: "oc_group_1",
+      threadId: `thread_${cli}_1`,
+      sourceMessageId: "om_original_1",
+      status: "running",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    sessionStore.save({
+      chatId: "oc_group_1",
+      threadId: `thread_${cli}_1`,
+      cli,
+      workspaceId: "/workspace",
+      activeRunId: "run_active",
+      activeTurnId: `turn_${cli}_active_1`,
+      updatedAt: new Date().toISOString()
+    });
+
+    let interruptCalls = 0;
+    let runTurnCalls = 0;
+    const codexWorker: CodexWorker = {
+      supportsSteer() {
+        return false;
+      },
+      async ensureThread() {
+        return `thread_${cli}_1`;
+      },
+      async interruptTurn(context) {
+        interruptCalls += 1;
+        assert.equal(context.threadId, `thread_${cli}_1`);
+        assert.equal(context.turnId, `turn_${cli}_active_1`);
+        assert.equal(context.interruptionMessage, "当前任务已被后续消息中断。");
+      },
+      async *runTurn(context): AsyncGenerator<CodexEvent> {
+        runTurnCalls += 1;
+        assert.equal(context.message.messageId, `om_group_${cli}_followup_1`);
+        yield {
+          kind: "thread_bound",
+          threadId: `thread_${cli}_1`
+        };
+        yield {
+          kind: "turn_bound",
+          turnId: `turn_${cli}_replacement_1`
+        };
+        yield {
+          kind: "run_status",
+          status: "completed"
+        };
+      }
+    };
+
+    const orchestrator = new ChatOrchestrator(
+      sessionStore,
+      runStore,
+      conversationStore,
+      createFeishuClient(),
+      createNoopDeliveryService(),
+      projector,
+      codexWorker,
+      createWorkspaceResolver(),
+      createScheduleService(),
+      "/workspace",
+      createLogger()
+    );
+
+    orchestrator.enqueue(
+      createMessage({
+        messageId: `om_group_${cli}_followup_1`,
+        text: `这条新消息应该直接接管当前 ${cli} turn`
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(interruptCalls, 1);
+    assert.equal(runTurnCalls, 1);
+    assert.equal(runStore.get("run_active")?.status, "failed");
+    assert.equal(runStore.get("run_active")?.errorMessage, "当前任务已被后续消息中断。");
+    assert.equal(runStore.list().length, 2);
+    assert.equal(runStore.list()[1]?.sourceMessageId, `om_group_${cli}_followup_1`);
+  });
+}
+
 test("ChatOrchestrator rejects group messages when workspace is not configured", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();
@@ -892,19 +1223,18 @@ test("ChatOrchestrator surfaces ensureThread failures for reusable sessions", as
   sessionStore.save({
     chatId: "oc_group_1",
     chatType: "group",
-    chatName: "docker-group",
-    chatDisplayName: "docker-group",
-    threadId: "thread_existing_docker",
+    chatName: "quant-group",
+    chatDisplayName: "quant-group",
+    threadId: "thread_existing_1",
     cli: "codex",
     workspaceId: "/home/overlogged/QuantDev",
-    executionMode: "docker",
     updatedAt: new Date().toISOString()
   });
 
   const codexWorker: CodexWorker = {
     async ensureThread() {
       ensureThreadCalls += 1;
-      throw new Error("Docker 模式当前不可用：bot 进程没有访问 Docker daemon 的权限。");
+      throw new Error("Codex app-server 当前不可用：连接失败。");
     },
     async *runTurn(): AsyncGenerator<CodexEvent> {
       runTurnCalls += 1;
@@ -931,8 +1261,7 @@ test("ChatOrchestrator surfaces ensureThread failures for reusable sessions", as
         return {
           ok: true,
           workspaceId: "/home/overlogged/QuantDev",
-          cli: "codex",
-          executionMode: "docker"
+          cli: "codex"
         };
       }
     }),
@@ -943,7 +1272,7 @@ test("ChatOrchestrator surfaces ensureThread failures for reusable sessions", as
 
   orchestrator.enqueue(
     createMessage({
-      messageId: "om_docker_error_1",
+      messageId: "om_ensure_thread_error_1",
       text: "继续"
     })
   );
@@ -954,11 +1283,11 @@ test("ChatOrchestrator surfaces ensureThread failures for reusable sessions", as
   assert.equal(runTurnCalls, 0);
   assert.equal(runStore.list().length, 1);
   assert.equal(runStore.list()[0]?.status, "failed");
-  assert.match(runStore.list()[0]?.errorMessage ?? "", /Docker 模式当前不可用/);
+  assert.match(runStore.list()[0]?.errorMessage ?? "", /Codex app-server 当前不可用/);
   assert.deepEqual(scheduledItemIds, [`error:${runStore.list()[0]!.runId}`]);
-  assert.match(conversationStore.list()[0]?.content ?? "", /Docker 模式当前不可用/);
+  assert.match(conversationStore.list()[0]?.content ?? "", /Codex app-server 当前不可用/);
   assert.equal(sessionStore.get("oc_group_1")?.activeRunId, undefined);
-  assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_existing_docker");
+  assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_existing_1");
 });
 
 test("ChatOrchestrator lists workspace catalog in direct chats without starting a run", async () => {
@@ -1083,7 +1412,6 @@ test("ChatOrchestrator binds group workspace when mentioned with a numeric code"
         return {
           ok: true,
           cli: "codex",
-          executionMode: "host",
           entry: {
             code: "12",
             workspace: "Quant/project-a",
@@ -1102,7 +1430,6 @@ test("ChatOrchestrator binds group workspace when mentioned with a numeric code"
         return createControlResult({
           kind: "bind_workspace",
           cli: "codex",
-          executionMode: "host",
           code: "12"
         });
       }
@@ -1123,7 +1450,7 @@ test("ChatOrchestrator binds group workspace when mentioned with a numeric code"
   assert.deepEqual(replyMessageIds, [undefined]);
   assert.deepEqual(replyInThreads, [undefined]);
   assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
-  assert.match(sentTexts[0] ?? "", /已将这个群绑定到 Host 模式的 Codex CLI 工作区 12: Quant\/project-a/);
+  assert.match(sentTexts[0] ?? "", /已将这个群绑定到 Codex CLI 工作区 12: Quant\/project-a/);
   assert.match(sentTexts[0] ?? "", /群里 @机器人的消息会继续进入这个群单独复用的配置线程/);
   assert.equal(sessionStore.get("oc_group_1")?.cli, "codex");
   assert.equal(sessionStore.get("oc_group_1")?.controlThreadId, "thread_control_1");
@@ -1175,7 +1502,6 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
         return {
           ok: true,
           cli: "claude",
-          executionMode: "host",
           entry: {
             code: "12",
             workspace: "Quant/project-a",
@@ -1193,7 +1519,6 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
         return createControlResult({
           kind: "bind_workspace",
           cli: "claude",
-          executionMode: "host",
           code: "12"
         });
       }
@@ -1212,7 +1537,6 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
   assert.deepEqual(bindInput, {
     chatId: "oc_group_1",
     cli: "claude",
-    executionMode: "host",
     code: "12",
     provider: undefined,
     model: undefined,
@@ -1221,197 +1545,7 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
   assert.match(sentTexts[0] ?? "", /Claude CLI/);
 });
 
-test("ChatOrchestrator binds group workspace with an explicit docker selector", async () => {
-  const sessionStore = new SessionStore();
-  const runStore = new RunStore();
-  const conversationStore = new ConversationStore();
-  const projector = new MessageProjector(runStore, conversationStore);
-  const sentTexts: string[] = [];
-  let bindInput:
-    | {
-        chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi";
-        executionMode: "host" | "docker";
-        code: string;
-      }
-    | undefined;
 
-  const orchestrator = new ChatOrchestrator(
-    sessionStore,
-    runStore,
-    conversationStore,
-    createFeishuClient({
-      async sendText(input) {
-        sentTexts.push(input.content);
-        return "om_text_group_bound_docker";
-      }
-    }),
-    {
-      schedule() {
-        return undefined;
-      },
-      async flushRun() {
-        return undefined;
-      }
-    } as never,
-    projector,
-    {
-      async ensureThread() {
-        return "thread_should_not_start";
-      },
-      async *runTurn(): AsyncGenerator<CodexEvent> {}
-    },
-    createWorkspaceResolver({
-      async bindGroupWorkspace(input) {
-        bindInput = input;
-        return {
-          ok: true,
-          cli: "codex",
-          executionMode: "docker",
-          entry: {
-            code: "12",
-            workspace: "Quant/project-a",
-            workspaceId: "/home/overlogged/Quant/project-a"
-          },
-          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
-        };
-      }
-    }),
-    createScheduleService(),
-    "/home/overlogged",
-    createLogger(),
-    createGroupControlAgent({
-      async interpret() {
-        return createControlResult({
-          kind: "bind_workspace",
-          cli: "codex",
-          executionMode: "docker",
-          code: "12"
-        });
-      }
-    })
-  );
-
-  orchestrator.enqueue(
-    createControlSession({
-      messageId: "om_group_bind_docker_1",
-      text: "@托帕 docker codex 12"
-    })
-  );
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  assert.deepEqual(bindInput, {
-    chatId: "oc_group_1",
-    cli: "codex",
-    executionMode: "docker",
-    code: "12",
-    provider: undefined,
-    model: undefined,
-    thinking: undefined
-  });
-  assert.match(sentTexts[0] ?? "", /Docker 模式的 Codex CLI/);
-  assert.match(sentTexts[0] ?? "", /docker \/ codex/);
-});
-
-test("ChatOrchestrator binds group workspace with docker pi DS4 Flash selector", async () => {
-  const sessionStore = new SessionStore();
-  const runStore = new RunStore();
-  const conversationStore = new ConversationStore();
-  const projector = new MessageProjector(runStore, conversationStore);
-  const sentTexts: string[] = [];
-  let bindInput:
-    | {
-        chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi";
-        executionMode: "host" | "docker";
-        code: string;
-        provider?: string;
-        model?: string;
-        thinking?: string;
-      }
-    | undefined;
-
-  const orchestrator = new ChatOrchestrator(
-    sessionStore,
-    runStore,
-    conversationStore,
-    createFeishuClient({
-      async sendText(input) {
-        sentTexts.push(input.content);
-        return "om_text_group_bound_docker_pi";
-      }
-    }),
-    {
-      schedule() {
-        return undefined;
-      },
-      async flushRun() {
-        return undefined;
-      }
-    } as never,
-    projector,
-    {
-      async ensureThread() {
-        return "thread_should_not_start";
-      },
-      async *runTurn(): AsyncGenerator<CodexEvent> {}
-    },
-    createWorkspaceResolver({
-      async bindGroupWorkspace(input) {
-        bindInput = input;
-        return {
-          ok: true,
-          cli: "pi",
-          executionMode: "docker",
-          model: "deepseek-v4-flash",
-          entry: {
-            code: "12",
-            workspace: "Quant/project-a",
-            workspaceId: "/home/overlogged/Quant/project-a"
-          },
-          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
-        };
-      }
-    }),
-    createScheduleService(),
-    "/home/overlogged",
-    createLogger(),
-    createGroupControlAgent({
-      async interpret() {
-        return createControlResult({
-          kind: "bind_workspace",
-          cli: "pi",
-          executionMode: "docker",
-          code: "12",
-          model: "deepseek-v4-flash"
-        });
-      }
-    })
-  );
-
-  orchestrator.enqueue(
-    createControlSession({
-      messageId: "om_group_bind_docker_pi_1",
-      text: "@托帕 docker pi ds4 flash 12"
-    })
-  );
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  assert.deepEqual(bindInput, {
-    chatId: "oc_group_1",
-    cli: "pi",
-    executionMode: "docker",
-    code: "12",
-    provider: undefined,
-    model: "deepseek-v4-flash",
-    thinking: undefined
-  });
-  assert.match(sentTexts[0] ?? "", /Docker 模式的 Pi CLI/);
-  assert.match(sentTexts[0] ?? "", /deepseek-v4-flash/);
-  assert.match(sentTexts[0] ?? "", /docker \/ pi/);
-});
 
 test("ChatOrchestrator creates a group scheduled task without starting a run", async () => {
   const sessionStore = new SessionStore();
@@ -1465,7 +1599,6 @@ test("ChatOrchestrator creates a group scheduled task without starting a run", a
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
-          executionMode: "host"
         };
       }
     }),
@@ -1577,7 +1710,6 @@ test("ChatOrchestrator creates a group one-time task without starting a run", as
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
-          executionMode: "host"
         };
       }
     }),
@@ -1687,7 +1819,6 @@ test("ChatOrchestrator executes multiple control actions in order", async () => 
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
-          executionMode: "host"
         };
       },
       async bindGroupWorkspace() {
@@ -1695,7 +1826,6 @@ test("ChatOrchestrator executes multiple control actions in order", async () => 
         return {
           ok: true,
           cli: "codex",
-          executionMode: "host",
           entry: {
             code: "12",
             workspace: "Quant",
@@ -1733,7 +1863,6 @@ test("ChatOrchestrator executes multiple control actions in order", async () => 
           {
             kind: "bind_workspace",
             cli: "codex",
-            executionMode: "host",
             code: "12"
           },
           {
@@ -1766,7 +1895,7 @@ test("ChatOrchestrator executes multiple control actions in order", async () => 
   assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
   assert.doesNotMatch(sentTexts[1] ?? "", /<at user_id=/);
   assert.deepEqual(replyMessageIds, [undefined, undefined]);
-  assert.match(sentTexts[0] ?? "", /已将这个群绑定到 Host 模式的 Codex CLI 工作区 12: Quant/);
+  assert.match(sentTexts[0] ?? "", /已将这个群绑定到 Codex CLI 工作区 12: Quant/);
   assert.match(sentTexts[1] ?? "", /已创建这个群的定时任务 4/);
 });
 
@@ -1788,7 +1917,6 @@ test("ChatOrchestrator routes natural-language group mentions into the reusable 
     threadId: "thread_group_main",
     cli: "codex",
     workspaceId: "/home/overlogged/Quant",
-    executionMode: "host",
     controlThreadId: "thread_control_existing",
     controlReplyToMessageId: "om_group_control_root_1",
     updatedAt: new Date().toISOString()
@@ -1828,7 +1956,7 @@ test("ChatOrchestrator routes natural-language group mentions into the reusable 
   orchestrator.enqueue(
     createControlSession({
       messageId: "om_group_mention_plain_1",
-      text: "@托帕 帮我把这个群切到 docker 模式"
+      text: "@托帕 帮我把这个群切到 pi 模式"
     })
   );
 
@@ -1865,7 +1993,6 @@ test("ChatOrchestrator sets a native Codex goal and streams the goal turn", asyn
     threadId: "thread_group_main",
     cli: "codex",
     workspaceId: "/home/overlogged/Quant",
-    executionMode: "host",
     controlThreadId: "thread_control_existing",
     updatedAt: new Date().toISOString()
   });
@@ -1970,7 +2097,6 @@ test("ChatOrchestrator clears a native Codex goal from the control plane", async
     threadId: "thread_group_main",
     cli: "codex",
     workspaceId: "/home/overlogged/Quant",
-    executionMode: "host",
     goal: "每次改代码前先看测试",
     controlThreadId: "thread_control_existing",
     updatedAt: new Date().toISOString()
@@ -2100,7 +2226,6 @@ test("ChatOrchestrator routes scheduled tasks into the active session", async ()
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
-          executionMode: "host"
         };
       }
     }),
@@ -2186,7 +2311,6 @@ test("ChatOrchestrator creates a fresh session when asked", async () => {
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
-          executionMode: "host"
         };
       }
     }),
@@ -2287,7 +2411,6 @@ test("ChatOrchestrator interrupts the active run before creating a fresh session
           ok: true,
           workspaceId: "/home/overlogged/Quant",
           cli: "codex",
-          executionMode: "host"
         };
       }
     }),
@@ -2319,4 +2442,143 @@ test("ChatOrchestrator interrupts the active run before creating a fresh session
   assert.equal(runStore.get("run_active")?.status, "failed");
   assert.match(runStore.get("run_active")?.errorMessage ?? "", /新会话/);
   assert.match(sentTexts[0] ?? "", /已结束这个群当前的活跃任务，并创建新的会话/);
+});
+
+test("ChatOrchestrator hands off context from the previous cli session file on switch", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+
+  const codexHome = await mkdtemp(join(tmpdir(), "orchestrator-handoff-codex-"));
+  const sessionsDir = join(codexHome, "sessions", "2026", "06", "28");
+  await mkdir(sessionsDir, { recursive: true });
+  await writeFile(
+    join(sessionsDir, "rollout-2026-06-28T13-29-02-thread_old_1.jsonl"),
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: "thread_old_1" } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "分析一下库存" }]
+        }
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "库存结构是这样" }]
+        }
+      })
+    ].join("\n"),
+    "utf8"
+  );
+
+  sessionStore.save({
+    chatId: "oc_group_1",
+    threadId: "thread_old_1",
+    cli: "codex",
+    workspaceId: "/workspace",
+    updatedAt: new Date().toISOString()
+  });
+
+  const sentTexts: string[] = [];
+  const calledClis: string[] = [];
+  let capturedText = "";
+  let resolveTurn: (() => void) | undefined;
+  const turnCompleted = new Promise<void>((resolve) => {
+    resolveTurn = resolve;
+  });
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_old_1";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      calledClis.push(context.cli);
+      capturedText = context.message.text;
+      yield {
+        kind: "thread_bound",
+        threadId: "thread_pi_1"
+      };
+      yield {
+        kind: "turn_bound",
+        turnId: "turn_pi_1"
+      };
+      yield {
+        kind: "assistant_message_started",
+        itemId: "msg_final_1",
+        source: "final_answer"
+      };
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "msg_final_1",
+        text: "收到"
+      };
+      resolveTurn?.();
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_notice_1";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({
+      async resolve() {
+        return {
+          ok: true,
+          workspaceId: "/workspace",
+          cli: "pi",
+        };
+      }
+    }),
+    createScheduleService(),
+    "/workspace",
+    createLogger()
+  );
+
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  try {
+    orchestrator.enqueue(createMessage({ text: "继续" }));
+    await turnCompleted;
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(calledClis, ["pi"]);
+  assert.match(capturedText, /系统交接说明/);
+  assert.match(capturedText, /分析一下库存/);
+  assert.match(capturedText, /库存结构是这样/);
+  assert.match(capturedText, /用户的新消息：\n继续/);
+  assert.ok(
+    sentTexts.some((text) => text.includes("已从 Codex 切换到 Pi，并恢复了之前的上下文。")),
+    `expected a switch notice, got: ${JSON.stringify(sentTexts)}`
+  );
+  assert.equal(sessionStore.get("oc_group_1")?.cli, "pi");
+  assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_pi_1");
 });

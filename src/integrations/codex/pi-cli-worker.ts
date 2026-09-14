@@ -22,6 +22,8 @@ interface PiModelSelection {
   thinking?: string;
 }
 
+export const PI_DS_FLASH_MODEL = "deepseek-flash";
+
 export interface PiCliProcessHandle {
   child: ChildProcessByStdio<null, Readable, Readable>;
   stop(): Promise<void>;
@@ -48,11 +50,26 @@ export function selectPiModelFromMessage(text: string): PiModelSelection {
   const normalized = normalizeWhitespace(text);
 
   if (
+    normalized.includes("glm 5 3 flash") ||
+    normalized.includes("glm 5.3 flash") ||
+    normalized.includes("glm 53 flash") ||
+    normalized.includes("glm flash") ||
+    normalized.includes("openmodel") ||
+    normalized.includes("open model") ||
+    includesWord(normalized, "glm")
+  ) {
+    return { provider: "openmodel", model: "glm-5.3-flash" };
+  }
+
+  if (
+    normalized.includes("deepseek v4.1 flash") ||
+    normalized.includes("ds4.1 flash") ||
+    normalized.includes("v4.1 flash") ||
     normalized.includes("deepseek v4 flash") ||
     normalized.includes("ds4 flash") ||
     normalized.includes("v4 flash")
   ) {
-    return { model: "deepseek-v4-flash" };
+    return { model: PI_DS_FLASH_MODEL };
   }
 
   if (
@@ -60,16 +77,18 @@ export function selectPiModelFromMessage(text: string): PiModelSelection {
     normalized.includes("ds4 pro") ||
     normalized.includes("v4 pro")
   ) {
-    return { model: "deepseek-v4-pro" };
+    return { model: PI_DS_FLASH_MODEL };
   }
 
   if (
+    normalized.includes("deepseek v4.1") ||
+    normalized.includes("ds4.1") ||
     normalized.includes("deepseek v4") ||
     normalized.includes("deepseek") ||
     normalized.includes("ds4") ||
     includesWord(normalized, "ds")
   ) {
-    return { model: "deepseek-v4-pro" };
+    return { model: PI_DS_FLASH_MODEL };
   }
 
   return {};
@@ -128,11 +147,18 @@ export function buildPiCliArgs(
 ): string[] {
   const args = ["-p", "--mode", "json", "--session", sessionPath];
   const messageSelection = selectPiModelFromMessage(context.message.text);
-  const provider =
-    messageSelection.provider ?? context.provider ?? env.PI_CLI_PROVIDER;
+  const explicitProvider = messageSelection.provider ?? context.provider;
   const model = canonicalizePiModel(
     messageSelection.model ?? context.model ?? env.PI_CLI_MODEL
   );
+  // GLM 模型只存在于本机 pi 的 openmodel 自定义 provider 里；如果 provider 只是
+  // 环境默认值（deepseek/openrouter），跨 provider 传 glm 模型会被上游 400 拒绝。
+  const envProvider = env.PI_CLI_PROVIDER;
+  const provider =
+    explicitProvider ??
+    (model?.startsWith("glm") && (envProvider === "deepseek" || envProvider === "openrouter")
+      ? "openmodel"
+      : envProvider);
   const thinking =
     messageSelection.thinking ?? context.thinking ?? env.PI_CLI_THINKING;
 

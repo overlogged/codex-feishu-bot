@@ -27,7 +27,6 @@ export interface AgentManagedSessionSummary {
   chatName?: string;
   chatDisplayName?: string;
   cli: ChatSession["cli"];
-  executionMode: NonNullable<ChatSession["executionMode"]>;
   workspaceId: string;
   threadId: string;
   updatedAt: string;
@@ -423,7 +422,6 @@ export class AgentManagerService {
       chatName: session.chatName,
       chatDisplayName: session.chatDisplayName,
       cli: session.cli,
-      executionMode: session.executionMode ?? "host",
       workspaceId: session.workspaceId,
       threadId: session.threadId,
       updatedAt: session.updatedAt,

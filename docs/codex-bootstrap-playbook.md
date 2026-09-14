@@ -46,7 +46,7 @@ agent-browser install
 13. Keep `DEFAULT_WORKSPACE` pointed at `/home/overlogged` unless the user explicitly wants another host root.
 14. Keep `CODEX_ARTIFACTS_DIR` pointed at the default artifact directory unless the user explicitly wants another export location.
 15. Group chats must not run until they are bound to a subdirectory under `DEFAULT_WORKSPACE`.
-16. The group binding flow is: private-chat the bot with `工作区`, then bind inside the target group with `@bot <编号>`, `@bot docker <编号>`, or equivalent natural language. If mode is omitted, default to `host`.
+16. The group binding flow is: private-chat the bot with `工作区`, then bind inside the target group with `@bot <编号>` or equivalent natural language. All sessions run directly on the host. Codex bindings default to `gpt-6-astra` with `high` reasoning; they can select `gpt-5.6-sol` and `low`, `medium`, `high`, `xhigh`, `max`, or `ultra` reasoning explicitly.
 
 ## Runtime Setup
 
@@ -70,6 +70,6 @@ If smoke passes, provide the user with:
 ## Guardrails
 
 - Do not ask the user to manually configure ordinary Feishu console steps.
-- Do not put `codex app-server` back inside Docker as the primary path.
+- Do not move `codex app-server` into a container; it must run on the host.
 - Do not expose secrets in terminal output beyond what is necessary to write `.env.real`.
 - If tenant policy blocks a permission or release action, explain exactly which screen is blocked and resume after the user resolves it.

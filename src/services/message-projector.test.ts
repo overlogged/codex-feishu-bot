@@ -50,6 +50,51 @@ test("MessageProjector keeps final answer separate from completed tool card", ()
   );
 });
 
+test("MessageProjector updates the streaming command detail in place instead of stacking", () => {
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const run = runStore.create({
+    chatId: "oc_chat_1",
+    threadId: "thread_1",
+    sourceMessageId: "om_source_1"
+  });
+
+  projector.apply(run.runId, {
+    kind: "tool_call_started",
+    itemId: "tool_1",
+    title: "执行命令",
+    command: "sleep"
+  });
+  projector.apply(run.runId, {
+    kind: "tool_call_delta",
+    itemId: "tool_1",
+    detail: "执行: sleep 18"
+  });
+  projector.apply(run.runId, {
+    kind: "tool_call_delta",
+    itemId: "tool_1",
+    detail: "执行: sleep 180 && tail -5 logs/run.log"
+  });
+  projector.apply(run.runId, {
+    kind: "tool_call_delta",
+    itemId: "tool_1",
+    detail: "读取日志输出"
+  });
+  projector.apply(run.runId, {
+    kind: "tool_call_delta",
+    itemId: "tool_1",
+    detail: "执行: nvidia-smi"
+  });
+
+  const item = projector.list(run.runId)[0];
+  assert.deepEqual(item?.details, [
+    "执行: sleep 180 && tail -5 logs/run.log",
+    "读取日志输出",
+    "执行: nvidia-smi"
+  ]);
+});
+
 test("MessageProjector keeps commentary and final answer as separate assistant items", () => {
   const runStore = new RunStore();
   const conversationStore = new ConversationStore();

@@ -2,7 +2,7 @@
 
 ## 开发原则
 
-- 运行时验证优先走 Docker，不要把 `pnpm start` 当成主验证路径
+- 运行时验证优先走宿主机 `pnpm start`，用 `pnpm host:smoke` 验收
 - 改动前先看 `README.md` 和 `AGENTS.md`
 - 和飞书、Codex 协议相关的改动，优先补测试再改实现
 
@@ -27,7 +27,7 @@ pnpm build
 ```bash
 pnpm bootstrap:env
 pnpm chrome:debug
-pnpm docker:real:smoke
+pnpm host:smoke
 ```
 
 ## Pull Request 说明

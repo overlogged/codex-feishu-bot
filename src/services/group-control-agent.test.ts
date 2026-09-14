@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { CodexEvent, IncomingChatMessage } from "../domain/types.js";
@@ -39,7 +42,7 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"claude","executionMode":"host","code":"2"}'
+        text: '{"kind":"bind_workspace","cli":"claude","code":"2"}'
       };
     }
   };
@@ -70,18 +73,21 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
       {
         kind: "bind_workspace",
         cli: "claude",
-        executionMode: "host",
         code: "2",
         provider: undefined,
         model: undefined,
         thinking: undefined
       }
     ],
-    threadId: "thread_control_1"
+    threadId: "thread_control_1",
+    cli: "codex"
   });
   assert.equal(runTurnCalls, 1);
   assert.match(lastPrompt, /多动作时返回/);
   assert.match(lastPrompt, /2: Quant/);
+  assert.match(lastPrompt, /model=gpt-6-astra/);
+  assert.match(lastPrompt, /model=gpt-5\.6-sol/);
+  assert.match(lastPrompt, /thinking 默认返回 high/);
 });
 
 test("CodexGroupControlAgent reuses the existing control thread when provided", async () => {
@@ -123,7 +129,8 @@ test("CodexGroupControlAgent reuses the existing control thread when provided", 
         kind: "show_binding"
       }
     ],
-    threadId: "thread_control_existing"
+    threadId: "thread_control_existing",
+    cli: "codex"
   });
 });
 
@@ -178,7 +185,8 @@ test("CodexGroupControlAgent falls back to a fresh control thread when the reuse
         kind: "show_binding"
       }
     ],
-    threadId: "thread_control_recovered"
+    threadId: "thread_control_recovered",
+    cli: "codex"
   });
 });
 
@@ -265,7 +273,6 @@ test("CodexGroupControlAgent interprets one-time schedule intents", async () => 
       currentBinding: {
         configured: true,
         cli: "codex",
-        executionMode: "host",
         workspaceId: "/home/overlogged/Quant"
       }
     }
@@ -312,7 +319,6 @@ test("CodexGroupControlAgent interprets goal control intents", async () => {
       currentBinding: {
         configured: true,
         cli: "codex",
-        executionMode: "host",
         workspaceId: "/home/overlogged/Quant"
       }
     }
@@ -370,7 +376,7 @@ test("CodexGroupControlAgent interprets pi bind intent", async () => {
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"pi","executionMode":"host","code":"2"}'
+        text: '{"kind":"bind_workspace","cli":"pi","code":"2"}'
       };
     }
   };
@@ -405,7 +411,6 @@ test("CodexGroupControlAgent interprets pi bind intent", async () => {
     {
       kind: "bind_workspace",
       cli: "pi",
-      executionMode: "host",
       code: "2",
       provider: undefined,
       model: undefined,
@@ -415,7 +420,7 @@ test("CodexGroupControlAgent interprets pi bind intent", async () => {
   assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
 });
 
-test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent", async () => {
+test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent as V4.1 Flash", async () => {
   const worker: CodexWorker = {
     async ensureThread() {
       return "thread_should_not_be_used";
@@ -424,7 +429,7 @@ test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent", async () =
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"deepseek","executionMode":"host","code":"2","model":"deepseek-v4-pro"}'
+        text: '{"kind":"bind_workspace","cli":"deepseek","code":"2","model":"deepseek-flash"}'
       };
     }
   };
@@ -459,16 +464,15 @@ test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent", async () =
     {
       kind: "bind_workspace",
       cli: "pi",
-      executionMode: "host",
       code: "2",
       provider: undefined,
-      model: "deepseek-v4-pro",
+      model: "deepseek-flash",
       thinking: undefined
     }
   ]);
 });
 
-test("CodexGroupControlAgent interprets docker DS4 Flash bind intent", async () => {
+test("CodexGroupControlAgent interprets GLM flash bind intent as pi with openmodel provider", async () => {
   const worker: CodexWorker = {
     async ensureThread() {
       return "thread_should_not_be_used";
@@ -477,7 +481,7 @@ test("CodexGroupControlAgent interprets docker DS4 Flash bind intent", async () 
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"deepseek","executionMode":"docker","code":"2","model":"deepseek-v4-flash"}'
+        text: '{"kind":"bind_workspace","cli":"glm","code":"2","provider":"openmodel","model":"glm-5.3-flash"}'
       };
     }
   };
@@ -485,7 +489,7 @@ test("CodexGroupControlAgent interprets docker DS4 Flash bind intent", async () 
   const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
   const result = await agent.interpret(
     createMessage({
-      text: "@托帕 把这个群绑定到 docker 的 DS4 Flash Quant"
+      text: "@托帕 把这个群绑定到 openmodel 的 GLM 5.3 Flash 的 Quant"
     }),
     {
       catalog: [
@@ -512,76 +516,26 @@ test("CodexGroupControlAgent interprets docker DS4 Flash bind intent", async () 
     {
       kind: "bind_workspace",
       cli: "pi",
-      executionMode: "docker",
       code: "2",
-      provider: undefined,
-      model: "deepseek-v4-flash",
+      provider: "openmodel",
+      model: "glm-5.3-flash",
       thinking: undefined
     }
   ]);
 });
 
-test("CodexGroupControlAgent normalizes ds dodocker bind intent", async () => {
-  const worker: CodexWorker = {
-    async ensureThread() {
-      return "thread_should_not_be_used";
-    },
-    async *runTurn(): AsyncGenerator<CodexEvent> {
-      yield {
-        kind: "assistant_message_completed",
-        itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"ds","executionMode":"dodocker","code":"2"}'
-      };
-    }
-  };
 
-  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
-  const result = await agent.interpret(
-    createMessage({
-      text: "@托帕 ds dodocker Quant"
-    }),
-    {
-      catalog: [
-        {
-          code: "1",
-          workspace: "Downloads",
-          workspaceId: "/home/overlogged/Downloads"
-        },
-        {
-          code: "2",
-          workspace: "Quant",
-          workspaceId: "/home/overlogged/Quant"
-        }
-      ],
-      scheduledTasks: [],
-      currentBinding: {
-        configured: false,
-        detail: "这个群还没有绑定工作区。"
-      }
-    }
-  );
-
-  assert.deepEqual(result.intents, [
-    {
-      kind: "bind_workspace",
-      cli: "pi",
-      executionMode: "docker",
-      code: "2",
-      provider: undefined,
-      model: undefined,
-      thinking: undefined
-    }
-  ]);
-});
 
 test("CodexGroupControlAgent passes custom cli to runTurn", async () => {
   let capturedCli: string | undefined;
+  let capturedModel: string | undefined;
   const worker: CodexWorker = {
     async ensureThread() {
       return "thread_should_not_be_used";
     },
     async *runTurn(context): AsyncGenerator<CodexEvent> {
       capturedCli = context.cli;
+      capturedModel = context.model;
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
@@ -590,7 +544,13 @@ test("CodexGroupControlAgent passes custom cli to runTurn", async () => {
     }
   };
 
-  const agent = new CodexGroupControlAgent(worker, "/home/overlogged", undefined, "claude");
+  const agent = new CodexGroupControlAgent(
+    worker,
+    "/home/overlogged",
+    undefined,
+    "pi",
+    "deepseek-v4-flash"
+  );
   const result = await agent.interpret(createMessage(), {
     catalog: [],
     scheduledTasks: [],
@@ -600,6 +560,175 @@ test("CodexGroupControlAgent passes custom cli to runTurn", async () => {
     }
   });
 
-  assert.equal(capturedCli, "claude");
+  assert.equal(capturedCli, "pi");
+  assert.equal(capturedModel, "deepseek-v4-flash");
   assert.deepEqual(result.intents, [{ kind: "show_binding" }]);
+});
+
+async function withCodexHome<T>(codexHome: string, run: () => Promise<T>): Promise<T> {
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previous;
+    }
+  }
+}
+
+test("CodexGroupControlAgent recovers handoff context from the previous cli session file", async () => {
+  const codexHome = await mkdtemp(join(tmpdir(), "control-handoff-codex-"));
+  const sessionsDir = join(codexHome, "sessions", "2026", "06", "28");
+  await mkdir(sessionsDir, { recursive: true });
+  await writeFile(
+    join(sessionsDir, "rollout-2026-06-28T13-29-02-thread_control_old.jsonl"),
+    [
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "一堆 prompt\n用户原始消息：\n@托帕 绑定到 2 号目录\n\n用户消息（已去掉 @提及）：\n绑定到 2 号目录"
+            }
+          ]
+        }
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: '{"kind":"bind_workspace","code":"2"}' }]
+        }
+      })
+    ].join("\n"),
+    "utf8"
+  );
+
+  const calledClis: string[] = [];
+  let capturedPrompt = "";
+  let capturedThreadId = "";
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      calledClis.push(context.cli);
+      capturedPrompt = context.message.text;
+      capturedThreadId = context.threadId;
+      yield {
+        kind: "thread_bound",
+        threadId: "pi_control_1"
+      };
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"show_binding"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(
+    worker,
+    "/home/overlogged",
+    undefined,
+    "pi",
+    "deepseek-v4-flash"
+  );
+  const result = await withCodexHome(codexHome, () =>
+    agent.interpret(
+      createMessage(),
+      {
+        catalog: [],
+        scheduledTasks: [],
+        currentBinding: {
+          configured: false,
+          detail: "未绑定"
+        }
+      },
+      {
+        controlThreadId: "thread_control_old",
+        controlThreadCli: "codex"
+      }
+    )
+  );
+
+  assert.deepEqual(calledClis, ["pi"]);
+  assert.match(capturedThreadId, /^pending:group-control:oc_group_1:/);
+  assert.match(capturedPrompt, /前序控制面交接摘要/);
+  assert.match(capturedPrompt, /绑定到 2 号目录/);
+  assert.equal(result.threadId, "pi_control_1");
+  assert.equal(result.cli, "pi");
+  assert.deepEqual(result.intents, [{ kind: "show_binding" }]);
+});
+
+test("CodexGroupControlAgent falls back to a live summary when the old session file is missing", async () => {
+  const codexHome = await mkdtemp(join(tmpdir(), "control-handoff-empty-"));
+  const calledClis: string[] = [];
+  let capturedPrompt = "";
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(context): AsyncGenerator<CodexEvent> {
+      calledClis.push(context.cli);
+      if (context.cli === "codex") {
+        assert.equal(context.threadId, "thread_control_old");
+        yield {
+          kind: "assistant_message_completed",
+          itemId: "summary_1",
+          text: "之前把这个群绑到了 Quant 的 2 号目录"
+        };
+        return;
+      }
+
+      capturedPrompt = context.message.text;
+      yield {
+        kind: "thread_bound",
+        threadId: "pi_control_1"
+      };
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"show_binding"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(
+    worker,
+    "/home/overlogged",
+    undefined,
+    "pi",
+    "deepseek-v4-flash"
+  );
+  const result = await withCodexHome(codexHome, () =>
+    agent.interpret(
+      createMessage(),
+      {
+        catalog: [],
+        scheduledTasks: [],
+        currentBinding: {
+          configured: false,
+          detail: "未绑定"
+        }
+      },
+      {
+        controlThreadId: "thread_control_old",
+        controlThreadCli: "codex"
+      }
+    )
+  );
+
+  assert.deepEqual(calledClis, ["codex", "pi"]);
+  assert.match(capturedPrompt, /前序控制面交接摘要/);
+  assert.match(capturedPrompt, /之前把这个群绑到了 Quant 的 2 号目录/);
+  assert.equal(result.threadId, "pi_control_1");
+  assert.equal(result.cli, "pi");
 });

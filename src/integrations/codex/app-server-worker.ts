@@ -161,6 +161,33 @@ export function buildTurnInput(
   ];
 }
 
+export function resolveCodexModelSettings(
+  context: Pick<CodexTurnContext, "model" | "thinking">,
+  env: Pick<Env, "CODEX_APP_SERVER_MODEL" | "CODEX_APP_SERVER_MODEL_REASONING_EFFORT">
+) {
+  return {
+    model: context.model?.trim() || env.CODEX_APP_SERVER_MODEL,
+    modelReasoningEffort:
+      context.thinking?.trim() || env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT
+  };
+}
+
+const CODEX_QUOTA_ERROR_PATTERN =
+  /usage[ _-]?limit|rate[ _-]?limit|too many requests|\b429\b|insufficient[_ ]?quota|quota exceeded|credits? (are )?depleted|额度/i;
+
+export function normalizeCodexTurnErrorMessage(message: string): string {
+  if (!CODEX_QUOTA_ERROR_PATTERN.test(message)) {
+    return message;
+  }
+
+  return [
+    message,
+    "",
+    "当前 Codex 账号额度不足，系统正在自动切换到其他账号。",
+    "稍等片刻后重新发送消息即可，本会话会在新账号上继续，不需要重新绑定。"
+  ].join("\n");
+}
+
 function buildSteerInput(context: CodexTurnContext) {
   return [
     {
@@ -298,8 +325,7 @@ export class CodexAppServerWorker implements CodexWorker {
           );
           const response = await connection.request<ThreadResponse>("thread/resume", {
             threadId: context.session.threadId,
-            model: this.env.CODEX_APP_SERVER_MODEL,
-            modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+            ...resolveCodexModelSettings(context, this.env),
             cwd: context.workspaceId,
             approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
             sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -337,8 +363,7 @@ export class CodexAppServerWorker implements CodexWorker {
         "开始创建新的 Codex thread"
       );
       const response = await connection.request<ThreadResponse>("thread/start", {
-        model: this.env.CODEX_APP_SERVER_MODEL,
-        modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+        ...resolveCodexModelSettings(context, this.env),
         cwd: context.workspaceId,
         approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
         sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -550,8 +575,7 @@ export class CodexAppServerWorker implements CodexWorker {
   ): Promise<string> {
     const response = await connection.request<ThreadResponse>("thread/resume", {
       threadId: context.threadId,
-      model: this.env.CODEX_APP_SERVER_MODEL,
-      modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+      ...resolveCodexModelSettings(context, this.env),
       cwd: context.workspaceId,
       approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
       sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -592,8 +616,7 @@ export class CodexAppServerWorker implements CodexWorker {
           this.env.CODEX_ARTIFACTS_DIR,
           this.env.FEISHU_BRIDGE_SCRIPT
         ),
-        model: this.env.CODEX_APP_SERVER_MODEL,
-        modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+        ...resolveCodexModelSettings(context, this.env),
         cwd: context.workspaceId,
         approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
         sandboxPolicy: {
@@ -682,8 +705,7 @@ export class CodexAppServerWorker implements CodexWorker {
           await resumedConnection.connect();
           await resumedConnection.request<ThreadResponse>("thread/resume", {
             threadId: state.currentThreadId,
-            model: this.env.CODEX_APP_SERVER_MODEL,
-            modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+            ...resolveCodexModelSettings(context, this.env),
             cwd: context.workspaceId,
             approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
             sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -725,10 +747,11 @@ export class CodexAppServerWorker implements CodexWorker {
             if (status === "failed") {
               queue.push({
                 kind: "error",
-                message:
+                message: normalizeCodexTurnErrorMessage(
                   targetTurn.error?.additionalDetails ??
-                  targetTurn.error?.message ??
-                  "Codex turn 失败"
+                    targetTurn.error?.message ??
+                    "Codex turn 失败"
+                )
               });
               finished = true;
               queue.close();
@@ -843,8 +866,7 @@ export class CodexAppServerWorker implements CodexWorker {
       const actualThreadId = context.threadId.startsWith("pending:")
         ? (
             await connection.request<ThreadResponse>("thread/start", {
-              model: this.env.CODEX_APP_SERVER_MODEL,
-              modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+              ...resolveCodexModelSettings(context, this.env),
               cwd: context.workspaceId,
               approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
               sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -855,8 +877,7 @@ export class CodexAppServerWorker implements CodexWorker {
         : (
             await connection.request<ThreadResponse>("thread/resume", {
               threadId: context.threadId,
-              model: this.env.CODEX_APP_SERVER_MODEL,
-              modelReasoningEffort: this.env.CODEX_APP_SERVER_MODEL_REASONING_EFFORT,
+              ...resolveCodexModelSettings(context, this.env),
               cwd: context.workspaceId,
               approvalPolicy: this.env.CODEX_APP_SERVER_APPROVAL_POLICY,
               sandbox: this.env.CODEX_APP_SERVER_SANDBOX,
@@ -900,7 +921,9 @@ export class CodexAppServerWorker implements CodexWorker {
       );
       queue.push({
         kind: "error",
-        message: error instanceof Error ? error.message : "无法启动 Codex streaming operation"
+        message: normalizeCodexTurnErrorMessage(
+          error instanceof Error ? error.message : "无法启动 Codex streaming operation"
+        )
       });
       finished = true;
       queue.close();
@@ -1115,7 +1138,6 @@ export class CodexAppServerWorker implements CodexWorker {
         queue.push({
           kind: "tool_call_delta",
           itemId,
-          detail: delta.trim() || undefined,
           output: nextOutput
         });
       }
@@ -1202,8 +1224,9 @@ export class CodexAppServerWorker implements CodexWorker {
       if (completed.turn.status === "failed") {
         queue.push({
           kind: "error",
-          message:
+          message: normalizeCodexTurnErrorMessage(
             completed.turn.error?.additionalDetails ?? completed.turn.error?.message ?? "Codex turn 失败"
+          )
         });
       } else if (completed.turn.status === "interrupted") {
         queue.push({
@@ -1271,7 +1294,7 @@ export class CodexAppServerWorker implements CodexWorker {
 
       queue.push({
         kind: "error",
-        message: maybeError?.message ?? "Codex App Server 返回错误"
+        message: normalizeCodexTurnErrorMessage(maybeError?.message ?? "Codex App Server 返回错误")
       });
       this.logger?.error(
         {

@@ -396,23 +396,23 @@ export function renderAssistantCardContent(item: ConversationItem, bodyOverride?
 }
 
 export function renderToolCardContent(item: ConversationItem): string {
-  const sections = [`**${toolPhaseLabel(item.phase)}**`];
+  const sections = [toolPhaseLabel(item.phase)];
   if (item.details.length > 0) {
     sections.push(item.details.map((line) => `- ${escapeMarkdownText(line)}`).join("\n"));
   }
   if (item.command) {
-    sections.push(`**命令**\n${fencedCode(item.command, "bash")}`);
+    sections.push(`命令\n${fencedCode(item.command, "bash")}`);
   }
   if (item.output) {
-    sections.push(`**输出**\n${fencedCode(item.output.slice(-1800))}`);
+    sections.push(`输出\n${fencedCode(item.output.slice(-6000))}`);
   }
   if (item.filePaths.length > 0) {
-    sections.push(`**涉及文件**\n${item.filePaths.map((path) => `- ${escapeMarkdownText(path)}`).join("\n")}`);
+    sections.push(`涉及文件\n${item.filePaths.map((path) => `- ${escapeMarkdownText(path)}`).join("\n")}`);
   }
 
   const summary = summarizeToolTitle(item);
   const elements: Array<Record<string, unknown>> = [
-    markdownTitleCollapsiblePanel(`**${toolPhaseLabel(item.phase)} · ${summary}**`, sections.join("\n\n"))
+    markdownTitleCollapsiblePanel(`${toolPhaseLabel(item.phase)} · ${summary}`, sections.join("\n\n"))
   ];
 
   const card: InteractiveCard = {

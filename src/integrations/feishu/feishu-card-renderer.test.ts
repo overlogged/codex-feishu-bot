@@ -138,11 +138,11 @@ test("renderToolCardContent emits markdown blocks for tool progress", () => {
   assert.equal(payload.body.elements[0].tag, "collapsible_panel");
   assert.equal(payload.body.elements[0].expanded, false);
   assert.equal(payload.body.elements[0].header.title.tag, "markdown");
-  assert.match(payload.body.elements[0].header.title.content, /\*\*已完成 · pnpm test\*\*/);
-  assert.match(payload.body.elements[0].elements[0].content, /\*\*已完成\*\*/);
+  assert.match(payload.body.elements[0].header.title.content, /已完成 · pnpm test/);
+  assert.match(payload.body.elements[0].elements[0].content, /已完成/);
   assert.match(payload.body.elements[0].elements[0].content, /- 启动测试/);
   assert.match(payload.body.elements[0].elements[0].content, /```bash/);
-  assert.match(payload.body.elements[0].elements[0].content, /\*\*输出\*\*/);
+  assert.match(payload.body.elements[0].elements[0].content, /输出/);
 });
 
 test("renderToolCardContent uses specific search query as folded title", () => {
@@ -160,6 +160,6 @@ test("renderToolCardContent uses specific search query as folded title", () => {
 
   assert.match(
     payload.body.elements[0].header.title.content,
-    /\*\*已完成 · Escape from Tarkov latest patch notes 2026 official\*\*/
+    /已完成 · Escape from Tarkov latest patch notes 2026 official/
   );
 });

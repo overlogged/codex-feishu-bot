@@ -4,7 +4,6 @@ import { dirname } from "node:path";
 
 import type {
   ChatCli,
-  ChatExecutionMode,
   ConversationItem,
   RunRecord,
   ChatSession,
@@ -107,10 +106,6 @@ function normalizeCli(value: unknown): ChatCli {
   return value === "claude" || value === "kimi" || value === "pi" ? value : "codex";
 }
 
-function normalizeExecutionMode(value: unknown): ChatExecutionMode {
-  return value === "docker" ? "docker" : "host";
-}
-
 export class RuntimeStatePersister {
   private timer?: NodeJS.Timeout;
   private latestWrite?: Promise<void>;
@@ -208,7 +203,6 @@ export class RuntimeStatePersister {
       const sanitizedSessions = sessions.map((session) => ({
         ...session,
         cli: normalizeCli((session as Partial<ChatSession>).cli),
-        executionMode: normalizeExecutionMode((session as Partial<ChatSession>).executionMode),
         activeRunId: undefined,
         activeTurnId: undefined
       }));

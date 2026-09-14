@@ -148,7 +148,6 @@ function printSession(session) {
   console.log(`  chatId: ${session.chatId}`);
   console.log(`  chatType: ${session.chatType}`);
   console.log(`  cli: ${session.cli}`);
-  console.log(`  executionMode: ${session.executionMode}`);
   console.log(`  workspace: ${session.workspaceId}`);
   console.log(`  threadId: ${session.threadId}`);
   console.log(`  runStatus: ${session.runStatus}`);

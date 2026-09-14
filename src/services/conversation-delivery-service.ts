@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { ConversationItem } from "../domain/types.js";
 import {
   renderAssistantCardContent,
+  renderToolCardContent,
   splitAssistantCardBodies
 } from "../integrations/feishu/feishu-message-client.js";
 import type { FeishuMessageClient } from "../integrations/feishu/feishu-message-client.js";
@@ -27,7 +28,8 @@ export class ConversationDeliveryService {
     private readonly feishuClient: FeishuMessageClient,
     private readonly conversationStore: ConversationStore,
     private readonly debounceMs: number,
-    private readonly logger: LoggerLike
+    private readonly logger: LoggerLike,
+    private readonly shouldDeliverToolCard?: (item: ConversationItem) => boolean
   ) {}
 
   schedule(item: ConversationItem): void {
@@ -98,6 +100,7 @@ export class ConversationDeliveryService {
     }
 
     if (item.kind === "tool_card") {
+      await this.deliverToolCardItem(item);
       return;
     }
 
@@ -184,6 +187,38 @@ export class ConversationDeliveryService {
       feishuMessageId: updatedMessageIds[0],
       feishuMessageIds: updatedMessageIds.slice(0, plan.contents.length),
       deliveredContentHash: plan.hash
+    });
+  }
+
+  private async deliverToolCardItem(item: ConversationItem): Promise<void> {
+    if (item.phase === "queued" || this.shouldDeliverToolCard?.(item) !== true) {
+      return;
+    }
+
+    const content = renderToolCardContent(item);
+    const hash = this.hashContent("tool_card", content);
+    if (item.deliveredContentHash === hash) {
+      return;
+    }
+
+    const existingMessageId = item.feishuMessageId;
+    const messageId = existingMessageId
+      ? existingMessageId
+      : await this.feishuClient.sendCard({
+          chatId: item.chatId,
+          content
+        });
+
+    if (existingMessageId) {
+      await this.feishuClient.updateCard({
+        messageId: existingMessageId,
+        content
+      });
+    }
+
+    this.conversationStore.update(item.runId, item.itemId, {
+      feishuMessageId: messageId,
+      deliveredContentHash: hash
     });
   }
 

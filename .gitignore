@@ -2,6 +2,7 @@ node_modules
 dist
 .env
 .env.real
+.env.real.bak.*
 .idea
 .DS_Store
 .codex-local

@@ -44,7 +44,6 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
     threadId: "thread_pi",
     cli: "pi",
     workspaceId: "/workspace",
-    executionMode: "docker",
     goal: "Pi 也带上这个 goal",
     goalUpdatedAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z"

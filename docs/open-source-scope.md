@@ -6,7 +6,7 @@
 - Codex reads the repository instructions and bootstrap docs.
 - Codex prepares `.env.real`, launches Chrome with CDP, and uses browser automation to configure Feishu Open Platform.
 - Codex keeps generated deliverables in a separate artifacts directory instead of polluting the repository root.
-- Codex runs against a dedicated mounted runtime workspace instead of the repository checkout root.
+- Codex runs against the configured `DEFAULT_WORKSPACE` instead of the repository checkout root.
 - The supported production path is a host-managed `codex app-server` plus a host-managed bot process.
 - Codex starts both host processes and validates them.
 
@@ -29,5 +29,5 @@
 ## Non-Goals for v1
 
 - Automating Feishu developer-console setup via unsupported management APIs.
-- Supporting Docker as the primary production path.
+- Container-based execution; all sessions run directly on the host.
 - Hiding every single third-party prompt; login and approval prompts still belong to the user.

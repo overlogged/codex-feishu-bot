@@ -18,6 +18,7 @@ fi
 
 systemctl --user enable --now codex-feishu-bot-codex.service
 systemctl --user enable --now codex-feishu-bot-app.service
+systemctl --user enable --now codex-feishu-bot-auth-watch.service
 
 READY=0
 for _ in $(seq 1 30); do
@@ -40,6 +41,7 @@ echo
 echo "started:"
 echo "  codex-feishu-bot-codex.service"
 echo "  codex-feishu-bot-app.service"
+echo "  codex-feishu-bot-auth-watch.service"
 echo
 echo "status:"
 echo "  systemctl --user status codex-feishu-bot-app.service"

@@ -1,6 +1,5 @@
 import type {
   ChatCli,
-  ChatExecutionMode,
   ChatSession,
   CodexEvent,
   IncomingChatMessage
@@ -10,7 +9,6 @@ export interface CodexTurnContext {
   session?: ChatSession;
   cli: ChatCli;
   workspaceId: string;
-  executionMode?: ChatExecutionMode;
   provider?: string;
   model?: string;
   thinking?: string;

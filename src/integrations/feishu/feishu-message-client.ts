@@ -8,7 +8,7 @@ import {
   splitAssistantCardBodies
 } from "./feishu-card-renderer.js";
 
-export { normalizeAssistantBody, renderAssistantCardContent, splitAssistantCardBodies };
+export { normalizeAssistantBody, renderAssistantCardContent, renderToolCardContent, splitAssistantCardBodies };
 
 export interface FeishuTextSendInput {
   chatId: string;
