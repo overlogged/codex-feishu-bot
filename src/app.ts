@@ -10,7 +10,7 @@ import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
 import { KimiAcpWorker } from "./integrations/codex/kimi-acp-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
-import { PiCliWorker, PI_DS_FLASH_MODEL } from "./integrations/codex/pi-cli-worker.js";
+import { PiRpcWorker, PI_DS_FLASH_MODEL } from "./integrations/codex/pi-rpc-worker.js";
 import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
 import { FakeFeishuMessageClient } from "./integrations/feishu/fake-feishu-message-client.js";
 import { FakeFeishuWsSubscriber } from "./integrations/feishu/fake-feishu-ws-subscriber.js";
@@ -52,7 +52,7 @@ function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
       codex: new CodexAppServerWorker(env, logger),
       claude: new ClaudeCliWorker(env, logger),
       kimi: new KimiAcpWorker(env, logger),
-      pi: new PiCliWorker(env, logger)
+      pi: new PiRpcWorker(env, logger)
     });
   }
 

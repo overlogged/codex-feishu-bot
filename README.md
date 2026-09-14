@@ -121,6 +121,13 @@ pnpm start
 pnpm host:smoke
 ```
 
+各 CLI 都按常驻 server/会话协议接入，不再每条消息重开进程：
+
+- `codex`：连接宿主机 `codex app-server`（WebSocket JSON-RPC）
+- `kimi`：启动 `kimi acp`（Agent Client Protocol，stdio JSON-RPC），按群复用长驻会话
+- `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；同一个 RPC 进程内直接 `steer`、`abort`
+- `claude`：仍为一次性 CLI 调用
+
 默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的一级子目录，不能直接把仓库根目录当运行工作区。
 
 ## 按群绑定

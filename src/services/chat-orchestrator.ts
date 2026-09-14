@@ -6,7 +6,7 @@ import type {
   ScheduledTaskRecord
 } from "../domain/types.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
-import { PI_DS_FLASH_MODEL } from "../integrations/codex/pi-cli-worker.js";
+import { PI_DS_FLASH_MODEL } from "../integrations/codex/pi-rpc-worker.js";
 import {
   readThreadTranscript,
   renderTranscriptExcerpt,

@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
+import type { Readable, Writable } from "node:stream";
 
-import type { CodexEvent } from "../../domain/types.js";
 import type { Env } from "../../config/env.js";
+import type { CodexEvent } from "../../domain/types.js";
 import { AsyncEventQueue } from "./async-event-queue.js";
 import { buildCliTurnInput } from "./cli-turn-input.js";
 import type { CodexInterruptContext, CodexTurnContext, CodexWorker } from "./codex-worker.js";
@@ -24,18 +25,27 @@ interface PiModelSelection {
 
 export const PI_DS_FLASH_MODEL = "deepseek-flash";
 
-export interface PiCliProcessHandle {
-  child: ChildProcessByStdio<null, Readable, Readable>;
+export type PiRpcChild = ChildProcessByStdio<Writable, Readable, Readable>;
+
+export interface PiRpcProcessHandle {
+  child: PiRpcChild;
   stop(): Promise<void>;
 }
 
-export interface PiCliRuntime {
+export interface PiRpcRuntime {
   prepare?(context: CodexTurnContext): Promise<void>;
   spawnProcess(options: {
-    turnId: string;
     context: CodexTurnContext;
     args: string[];
-  }): PiCliProcessHandle;
+  }): PiRpcProcessHandle;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function truncateText(value: string, maxLength = 200): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;
 }
 
 function normalizeWhitespace(text: string): string {
@@ -140,12 +150,16 @@ function resolvePiThreadId(context: CodexTurnContext & { threadId?: string }): s
   );
 }
 
-export function buildPiCliArgs(
+interface PiResolvedSettings {
+  provider?: string;
+  model?: string;
+  thinking?: string;
+}
+
+function resolvePiSettings(
   env: Pick<Env, "PI_CLI_PROVIDER" | "PI_CLI_MODEL" | "PI_CLI_THINKING">,
-  context: CodexTurnContext,
-  sessionPath: string
-): string[] {
-  const args = ["-p", "--mode", "json", "--session", sessionPath];
+  context: CodexTurnContext
+): PiResolvedSettings {
   const messageSelection = selectPiModelFromMessage(context.message.text);
   const explicitProvider = messageSelection.provider ?? context.provider;
   const model = canonicalizePiModel(
@@ -159,29 +173,38 @@ export function buildPiCliArgs(
     (model?.startsWith("glm") && (envProvider === "deepseek" || envProvider === "openrouter")
       ? "openmodel"
       : envProvider);
-  const thinking =
-    messageSelection.thinking ?? context.thinking ?? env.PI_CLI_THINKING;
+  const thinking = messageSelection.thinking ?? context.thinking ?? env.PI_CLI_THINKING;
 
-  if (provider) {
-    args.push("--provider", provider);
-  } else if (model?.startsWith("deepseek")) {
+  return { provider, model, thinking };
+}
+
+export function buildPiRpcArgs(
+  env: Pick<Env, "PI_CLI_PROVIDER" | "PI_CLI_MODEL" | "PI_CLI_THINKING">,
+  context: CodexTurnContext,
+  sessionPath: string
+): string[] {
+  const settings = resolvePiSettings(env, context);
+  const args = ["--mode", "rpc", "--session", sessionPath, "--approve"];
+
+  if (settings.provider) {
+    args.push("--provider", settings.provider);
+  } else if (settings.model?.startsWith("deepseek")) {
     args.push("--provider", "openrouter");
   }
 
-  if (model) {
-    args.push("--model", model);
+  if (settings.model) {
+    args.push("--model", settings.model);
   }
 
-  if (thinking) {
-    args.push("--thinking", thinking);
+  if (settings.thinking) {
+    args.push("--thinking", settings.thinking);
   }
 
-  args.push(buildCliTurnInput(context));
   return args;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function piSettingsKey(settings: PiResolvedSettings): string {
+  return `${settings.provider ?? ""}|${settings.model ?? ""}|${settings.thinking ?? ""}`;
 }
 
 function parseJsonLine(line: string): Record<string, unknown> | undefined {
@@ -265,7 +288,7 @@ interface PiToolState {
   output?: string;
 }
 
-class PiJsonTurnProjector {
+export class PiRpcTurnProjector {
   private readonly commentaryItemId: string;
   private readonly finalItemId: string;
   private commentaryStarted = false;
@@ -307,7 +330,11 @@ class PiJsonTurnProjector {
     }
   }
 
-  finalize(options: { errorMessage?: string }): CodexEvent[] {
+  ingestEvent(entry: Record<string, unknown>): CodexEvent[] {
+    return this.ingestLine(JSON.stringify(entry));
+  }
+
+  finalize(options: { cancelled?: boolean; errorMessage?: string }): CodexEvent[] {
     const events: CodexEvent[] = [];
 
     if (this.commentaryStarted) {
@@ -334,6 +361,10 @@ class PiJsonTurnProjector {
       return events;
     }
 
+    if (options.cancelled) {
+      return events;
+    }
+
     if (!this.finalStarted) {
       const fallback = this.rawText.trim();
       if (fallback) {
@@ -347,8 +378,8 @@ class PiJsonTurnProjector {
         events.push({
           kind: "error",
           message: this.commentaryStarted
-            ? "Pi CLI 没有返回最终答复。"
-            : "Pi CLI 没有返回可见内容。"
+            ? "Pi RPC 没有返回最终答复。"
+            : "Pi RPC 没有返回可见内容。"
         });
       }
     }
@@ -540,10 +571,8 @@ class PiJsonTurnProjector {
   }
 }
 
-async function terminateChildProcess(
-  child: ChildProcessByStdio<null, Readable, Readable>
-): Promise<void> {
-  if (child.killed) {
+async function terminateChildProcess(child: PiRpcChild): Promise<void> {
+  if (child.killed || child.exitCode !== null) {
     return;
   }
 
@@ -571,47 +600,307 @@ async function terminateChildProcess(
   });
 }
 
-class HostPiCliRuntime implements PiCliRuntime {
+class HostPiRpcRuntime implements PiRpcRuntime {
   constructor(private readonly env: Env) {}
 
   spawnProcess(options: {
-    turnId: string;
     context: CodexTurnContext;
     args: string[];
-  }): PiCliProcessHandle {
+  }): PiRpcProcessHandle {
     const child = spawn(this.env.PI_CLI_COMMAND, options.args, {
       cwd: options.context.workspaceId,
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"]
     });
 
     return {
       child,
-      async stop() {
-        await terminateChildProcess(child);
-      }
+      stop: () => terminateChildProcess(child)
     };
   }
 }
 
-export class PiCliWorker implements CodexWorker {
-  private readonly activeTurns = new Map<
-    string,
-    {
-      handle: PiCliProcessHandle;
-      interrupted: boolean;
-      interruptionMessage?: string;
+interface PendingRpcRequest {
+  resolve(entry: Record<string, unknown>): void;
+  reject(error: Error): void;
+}
+
+interface Deferred {
+  promise: Promise<void>;
+  resolve(): void;
+}
+
+function createDeferred(): Deferred {
+  let resolveFn: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    resolveFn = resolve;
+  });
+  return {
+    promise,
+    resolve: resolveFn
+  };
+}
+
+class PiRpcSession {
+  private readonly pending = new Map<number, PendingRpcRequest>();
+  private nextRequestId = 1;
+  private readonly decoder = new StringDecoder("utf8");
+  private lineBuffer = "";
+  private closed = false;
+  private onEvent?: (entry: Record<string, unknown>) => void;
+  private settleDeferred?: Deferred;
+
+  constructor(
+    private readonly handle: PiRpcProcessHandle,
+    readonly sessionPath: string,
+    readonly settingsKey: string,
+    private readonly logger?: LoggerLike
+  ) {
+    const { child } = handle;
+    child.stdout.on("data", (chunk: Buffer) => {
+      this.consumeChunk(chunk);
+    });
+    child.stdout.on("end", () => {
+      this.flushBuffer();
+    });
+    child.stderr.on("data", (chunk) => {
+      const text = String(chunk).trim();
+      if (text) {
+        this.logger?.warn(
+          { sessionPath: this.sessionPath, stderr: truncateText(text, 500) },
+          "Pi RPC 进程 stderr"
+        );
+      }
+    });
+    child.once("close", (code, signal) => {
+      this.closed = true;
+      const error = new Error(
+        `Pi RPC 进程已退出 (code=${code ?? "null"}, signal=${signal ?? "null"})。`
+      );
+      for (const request of this.pending.values()) {
+        request.reject(error);
+      }
+      this.pending.clear();
+      this.settleDeferred?.resolve();
+    });
+  }
+
+  isAlive(): boolean {
+    return !this.closed && !this.handle.child.killed && this.handle.child.exitCode === null;
+  }
+
+  async ready(): Promise<void> {
+    await this.request({ type: "get_state" });
+  }
+
+  async prompt(
+    text: string,
+    onEvent: (entry: Record<string, unknown>) => void
+  ): Promise<{ stopReason?: string }> {
+    if (!this.isAlive()) {
+      throw new Error("Pi RPC 进程不可用。");
     }
-  >();
+
+    const settle = createDeferred();
+    this.onEvent = onEvent;
+    this.settleDeferred = settle;
+
+    try {
+      const response = await this.request({ type: "prompt", message: text });
+      if (response.success === false) {
+        throw new Error(
+          typeof response.error === "string" ? response.error : "Pi RPC prompt 被拒绝。"
+        );
+      }
+
+      await settle.promise;
+      if (!this.isAlive()) {
+        throw new Error("Pi RPC 进程在任务完成前退出。");
+      }
+      return {};
+    } finally {
+      this.onEvent = undefined;
+      this.settleDeferred = undefined;
+    }
+  }
+
+  async steer(text: string): Promise<void> {
+    const response = await this.request({ type: "steer", message: text });
+    if (response.success === false) {
+      throw new Error(typeof response.error === "string" ? response.error : "Pi RPC steer 失败。");
+    }
+  }
+
+  async abort(): Promise<void> {
+    try {
+      await this.request({ type: "abort" });
+    } catch (error) {
+      this.logger?.warn(
+        {
+          sessionPath: this.sessionPath,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "Pi RPC abort 失败"
+      );
+    } finally {
+      this.settleDeferred?.resolve();
+    }
+  }
+
+  async stop(): Promise<void> {
+    await this.handle.stop();
+  }
+
+  private request(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!this.isAlive()) {
+      return Promise.reject(new Error("Pi RPC 进程不可用。"));
+    }
+
+    const id = this.nextRequestId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.write({ ...command, id });
+    });
+  }
+
+  private write(message: Record<string, unknown>): void {
+    try {
+      this.handle.child.stdin.write(`${JSON.stringify(message)}\n`);
+    } catch (error) {
+      this.logger?.warn(
+        {
+          sessionPath: this.sessionPath,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "Pi RPC 写入请求失败"
+      );
+    }
+  }
+
+  private consumeChunk(chunk: Buffer): void {
+    this.lineBuffer += this.decoder.write(chunk);
+    let newlineIndex = this.lineBuffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      let line = this.lineBuffer.slice(0, newlineIndex);
+      this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
+      if (line.endsWith("\r")) {
+        line = line.slice(0, -1);
+      }
+      this.handleLine(line);
+      newlineIndex = this.lineBuffer.indexOf("\n");
+    }
+  }
+
+  private flushBuffer(): void {
+    this.lineBuffer += this.decoder.end();
+    if (!this.lineBuffer) {
+      return;
+    }
+
+    let line = this.lineBuffer;
+    this.lineBuffer = "";
+    if (line.endsWith("\r")) {
+      line = line.slice(0, -1);
+    }
+    this.handleLine(line);
+  }
+
+  private handleLine(line: string): void {
+    if (!line.trim()) {
+      return;
+    }
+
+    let entry: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (!isRecord(parsed)) {
+        return;
+      }
+      entry = parsed;
+    } catch {
+      this.logger?.warn(
+        { sessionPath: this.sessionPath, line: truncateText(line, 300) },
+        "Pi RPC 输出了一行非 JSON 内容"
+      );
+      return;
+    }
+
+    const type = entry.type;
+    if (type === "response") {
+      const id = typeof entry.id === "number" ? entry.id : undefined;
+      const request = id !== undefined ? this.pending.get(id) : undefined;
+      if (request && id !== undefined) {
+        this.pending.delete(id);
+        request.resolve(entry);
+      }
+      return;
+    }
+
+    if (type === "extension_ui_request") {
+      this.handleExtensionUiRequest(entry);
+      return;
+    }
+
+    if (type === "agent_settled") {
+      this.settleDeferred?.resolve();
+      return;
+    }
+
+    this.onEvent?.(entry);
+  }
+
+  private handleExtensionUiRequest(entry: Record<string, unknown>): void {
+    const id = entry.id;
+    const method = entry.method;
+    if (id === undefined) {
+      return;
+    }
+
+    if (method === "confirm") {
+      this.write({ type: "extension_ui_response", id, confirmed: true });
+      return;
+    }
+
+    if (method === "select" || method === "input" || method === "editor") {
+      this.logger?.warn(
+        { sessionPath: this.sessionPath, method, title: entry.title },
+        "Pi RPC 收到交互式 UI 请求，已自动取消"
+      );
+      this.write({ type: "extension_ui_response", id, cancelled: true });
+      return;
+    }
+
+    // notify / setStatus / setWidget / setTitle / set_editor_text are fire-and-forget.
+  }
+}
+
+interface ActivePiTurn {
+  session: PiRpcSession;
+  interrupted: boolean;
+  interruptionMessage?: string;
+}
+
+interface PiSessionRecord {
+  session: PiRpcSession;
+  settingsKey: string;
+  sessionPath: string;
+}
+
+export class PiRpcWorker implements CodexWorker {
+  private readonly sessionsByChatId = new Map<string, PiSessionRecord>();
+  private readonly activeTurns = new Map<string, ActivePiTurn>();
+  private readonly runtime: PiRpcRuntime;
 
   constructor(
     private readonly env: Env,
     private readonly logger?: LoggerLike,
-    private readonly runtime: PiCliRuntime = new HostPiCliRuntime(env)
-  ) {}
+    runtime?: PiRpcRuntime
+  ) {
+    this.runtime = runtime ?? new HostPiRpcRuntime(env);
+  }
 
   supportsSteer(): boolean {
-    return false;
+    return true;
   }
 
   async ensureThread(context: CodexTurnContext): Promise<string> {
@@ -622,6 +911,17 @@ export class PiCliWorker implements CodexWorker {
     return threadId;
   }
 
+  async steerTurn(
+    context: CodexTurnContext & { threadId: string; turnId: string }
+  ): Promise<void> {
+    const activeTurn = this.activeTurns.get(context.turnId);
+    if (!activeTurn) {
+      throw new Error("当前 Pi turn 不在运行中，无法 steer。");
+    }
+
+    await activeTurn.session.steer(buildPiSteerInput(context));
+  }
+
   async interruptTurn(context: CodexInterruptContext): Promise<void> {
     const activeTurn = this.activeTurns.get(context.turnId);
     if (!activeTurn) {
@@ -630,37 +930,32 @@ export class PiCliWorker implements CodexWorker {
 
     activeTurn.interrupted = true;
     activeTurn.interruptionMessage = context.interruptionMessage ?? "当前任务已被中断。";
-    await activeTurn.handle.stop();
+    await activeTurn.session.abort();
   }
 
   async *runTurn(
     context: CodexTurnContext & { threadId: string }
   ): AsyncGenerator<CodexEvent> {
     const turnId = randomUUID();
-    const threadId = resolvePiThreadId(context);
-    await mkdir(dirname(threadId), {
+    const sessionPath = resolvePiThreadId(context);
+    await mkdir(dirname(sessionPath), {
       recursive: true
     });
     await this.runtime.prepare?.(context);
-    const args = buildPiCliArgs(this.env, context, threadId);
 
     this.logger?.info(
       {
         cli: "pi",
+        mode: "rpc",
         command: this.env.PI_CLI_COMMAND,
-        args,
         chatId: context.message.chatId,
         messageId: context.message.messageId,
         workspaceId: context.workspaceId,
-        threadId
+        sessionPath
       },
-      "开始执行 Pi CLI turn"
+      "开始执行 Pi RPC turn"
     );
 
-    yield {
-      kind: "thread_bound",
-      threadId
-    };
     yield {
       kind: "turn_bound",
       turnId
@@ -670,101 +965,127 @@ export class PiCliWorker implements CodexWorker {
       status: "running"
     };
 
-    let activeTurn:
-      | {
-          handle: PiCliProcessHandle;
-          interrupted: boolean;
-          interruptionMessage?: string;
-        }
-      | undefined;
+    const session = await this.getOrCreateSession(context, sessionPath);
+    yield {
+      kind: "thread_bound",
+      threadId: sessionPath
+    };
+
     const eventQueue = new AsyncEventQueue<CodexEvent>();
-    const projector = new PiJsonTurnProjector(turnId);
-    let stderr = "";
-    let lineBuffer = "";
-    let settled = false;
-    let handle: PiCliProcessHandle | undefined;
-
-    const pushProjectorEvents = (events: CodexEvent[]) => {
-      for (const event of events) {
-        eventQueue.push(event);
-      }
+    const projector = new PiRpcTurnProjector(turnId);
+    const activeTurn: ActivePiTurn = {
+      session,
+      interrupted: false
     };
-    const flushLineBuffer = () => {
-      if (!lineBuffer.trim()) {
-        lineBuffer = "";
-        return;
-      }
+    this.activeTurns.set(turnId, activeTurn);
 
-      pushProjectorEvents(projector.ingestLine(lineBuffer));
-      lineBuffer = "";
-    };
-    const finish = (exitCode: number, errorMessage?: string) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      flushLineBuffer();
-      this.activeTurns.delete(turnId);
-
-      const finalErrorMessage =
-        errorMessage ??
-        (activeTurn?.interrupted
-          ? activeTurn.interruptionMessage ?? "当前任务已被中断。"
-          : exitCode !== 0
-            ? stderr.trim() || "Pi CLI 执行失败。"
-            : undefined);
-      pushProjectorEvents(projector.finalize({ errorMessage: finalErrorMessage }));
-      eventQueue.close();
-    };
-
-    try {
-      handle = this.runtime.spawnProcess({
-        turnId,
-        context,
-        args
-      });
-      const { child } = handle;
-      const activeTurnRecord = {
-        handle,
-        interrupted: false,
-        interruptionMessage: undefined
-      };
-      activeTurn = activeTurnRecord;
-      this.activeTurns.set(turnId, activeTurnRecord);
-
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        lineBuffer += chunk;
-        let newlineIndex = lineBuffer.indexOf("\n");
-        while (newlineIndex >= 0) {
-          const line = lineBuffer.slice(0, newlineIndex);
-          lineBuffer = lineBuffer.slice(newlineIndex + 1);
-          pushProjectorEvents(projector.ingestLine(line));
-          newlineIndex = lineBuffer.indexOf("\n");
+    void session
+      .prompt(buildCliTurnInput(context), (entry) => {
+        for (const event of projector.ingestEvent(entry)) {
+          eventQueue.push(event);
         }
+      })
+      .then(() => {
+        for (const event of projector.finalize({
+          cancelled: activeTurn.interrupted
+        })) {
+          eventQueue.push(event);
+        }
+      })
+      .catch((error) => {
+        for (const event of projector.finalize({
+          cancelled: activeTurn.interrupted,
+          errorMessage: activeTurn.interrupted
+            ? undefined
+            : error instanceof Error
+              ? error.message
+              : String(error)
+        })) {
+          eventQueue.push(event);
+        }
+      })
+      .finally(() => {
+        eventQueue.close();
+        this.activeTurns.delete(turnId);
       });
-      child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-      });
-      child.on("error", (error) => {
-        finish(1, error instanceof Error ? error.message : String(error));
-      });
-      child.on("close", (exitCode) => {
-        finish(exitCode ?? 1);
-      });
-    } catch (error) {
-      finish(1, error instanceof Error ? error.message : String(error));
-    }
 
-    try {
-      yield* eventQueue.iterate();
-    } finally {
-      if (!settled) {
-        await handle?.stop();
-        finish(1, "Pi CLI 执行被取消。");
+    for (;;) {
+      const next = await eventQueue.next();
+      if (next.done) {
+        break;
       }
+
+      yield next.value;
     }
   }
+
+  async close(): Promise<void> {
+    const sessions = Array.from(this.sessionsByChatId.values());
+    this.sessionsByChatId.clear();
+    await Promise.allSettled(sessions.map((record) => record.session.stop()));
+  }
+
+  private async getOrCreateSession(
+    context: CodexTurnContext & { threadId: string },
+    sessionPath: string
+  ): Promise<PiRpcSession> {
+    const chatId = context.message.chatId;
+    const settingsKey = piSettingsKey(resolvePiSettings(this.env, context));
+    const existing = this.sessionsByChatId.get(chatId);
+
+    if (
+      existing?.session.isAlive() &&
+      existing.sessionPath === sessionPath &&
+      existing.settingsKey === settingsKey
+    ) {
+      return existing.session;
+    }
+
+    if (existing) {
+      this.sessionsByChatId.delete(chatId);
+      this.logger?.info(
+        {
+          chatId,
+          previousSessionPath: existing.sessionPath,
+          nextSessionPath: sessionPath,
+          previousSettingsKey: existing.settingsKey,
+          nextSettingsKey: settingsKey
+        },
+        "Pi RPC 会话参数已变化，重启 RPC 进程"
+      );
+      await existing.session.stop();
+    }
+
+    const args = buildPiRpcArgs(this.env, context, sessionPath);
+    const handle = this.runtime.spawnProcess({
+      context,
+      args
+    });
+    const session = new PiRpcSession(handle, sessionPath, settingsKey, this.logger);
+    this.sessionsByChatId.set(chatId, {
+      session,
+      settingsKey,
+      sessionPath
+    });
+    handle.child.once("close", () => {
+      const current = this.sessionsByChatId.get(chatId);
+      if (current?.session === session) {
+        this.sessionsByChatId.delete(chatId);
+      }
+    });
+    await session.ready();
+    return session;
+  }
+}
+
+function buildPiSteerInput(context: CodexTurnContext): string {
+  return [
+    "Additional user message received while the current turn is still active.",
+    `- Feishu chat: ${context.message.chatId}`,
+    `- New user message id: ${context.message.messageId}`,
+    "- Treat this as the latest instruction and adjust the ongoing turn accordingly.",
+    "",
+    "Latest user message:",
+    context.message.text
+  ].join("\n");
 }
