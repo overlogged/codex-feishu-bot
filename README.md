@@ -125,7 +125,7 @@ pnpm host:smoke
 
 - `codex`：连接宿主机 `codex app-server`（WebSocket JSON-RPC）
 - `kimi`：启动 `kimi acp`（Agent Client Protocol，stdio JSON-RPC），按群复用长驻会话
-- `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；同一个 RPC 进程内直接 `steer`、`abort`
+- `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；活跃 turn 内收到新消息会用 `abort` 打断当前 turn，再用最新消息立即重跑
 - `claude`：仍为一次性 CLI 调用
 
 默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的一级子目录，不能直接把仓库根目录当运行工作区。

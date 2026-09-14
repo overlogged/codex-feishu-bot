@@ -336,43 +336,13 @@ test("PiRpcWorker reuses one RPC process across turns with the same settings", a
   await worker.close();
 });
 
-test("PiRpcWorker steers an active turn through the RPC steer command", async () => {
-  const { runtime, commands } = createFakePiRpcSpawn({ holdPromptUntilAbort: true });
+test("PiRpcWorker opts out of steer so the orchestrator interrupts and reruns", async () => {
+  const { runtime } = createFakePiRpcSpawn();
   const worker = new PiRpcWorker(buildWorkerEnv(), undefined, runtime);
-  const threadId = await worker.ensureThread(buildContext());
 
-  assert.equal(worker.supportsSteer(), true);
-
-  const eventsPromise = collectEvents(worker, threadId);
-
-  let turnId: string | undefined;
-  const activeTurns = () =>
-    (worker as unknown as { activeTurns: Map<string, unknown> }).activeTurns;
-  for (let attempt = 0; attempt < 100 && !turnId; attempt += 1) {
-    turnId = Array.from(activeTurns().keys())[0];
-    if (!turnId) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  assert.ok(turnId, "active turn should be registered");
-
-  await worker.steerTurn({
-    ...buildContext("改成先写测试"),
-    threadId,
-    turnId
-  });
-
-  // Finish the held turn so the generator can complete.
-  await worker.interruptTurn({
-    ...buildContext(),
-    threadId,
-    turnId,
-    interruptionMessage: "结束"
-  });
-
-  const events = await eventsPromise;
-  assert.ok(commands.some((command) => command.type === "steer"));
-  assert.ok(!events.some((event) => event.kind === "error"));
+  // Pi RPC 的 steer 会排在当前工具调用之后，长任务会长时间不回，所以这里不宣告 steer；
+  // 编排器会改成 abort 当前 turn 然后用最新消息重跑。
+  assert.equal(worker.supportsSteer(), false);
 
   await worker.close();
 });

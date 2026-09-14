@@ -724,13 +724,6 @@ class PiRpcSession {
     }
   }
 
-  async steer(text: string): Promise<void> {
-    const response = await this.request({ type: "steer", message: text });
-    if (response.success === false) {
-      throw new Error(typeof response.error === "string" ? response.error : "Pi RPC steer 失败。");
-    }
-  }
-
   async abort(): Promise<void> {
     try {
       await this.request({ type: "abort" });
@@ -877,7 +870,6 @@ class PiRpcSession {
 interface ActivePiTurn {
   session: PiRpcSession;
   interrupted: boolean;
-  interruptionMessage?: string;
 }
 
 interface PiSessionRecord {
@@ -900,7 +892,9 @@ export class PiRpcWorker implements CodexWorker {
   }
 
   supportsSteer(): boolean {
-    return true;
+    // Pi RPC 的 steer 只会把消息排到当前工具调用之后，长任务会长时间不回。
+    // 这里不宣告 steer，让编排器走「中断当前 turn + 立即用最新消息重跑」。
+    return false;
   }
 
   async ensureThread(context: CodexTurnContext): Promise<string> {
@@ -911,17 +905,6 @@ export class PiRpcWorker implements CodexWorker {
     return threadId;
   }
 
-  async steerTurn(
-    context: CodexTurnContext & { threadId: string; turnId: string }
-  ): Promise<void> {
-    const activeTurn = this.activeTurns.get(context.turnId);
-    if (!activeTurn) {
-      throw new Error("当前 Pi turn 不在运行中，无法 steer。");
-    }
-
-    await activeTurn.session.steer(buildPiSteerInput(context));
-  }
-
   async interruptTurn(context: CodexInterruptContext): Promise<void> {
     const activeTurn = this.activeTurns.get(context.turnId);
     if (!activeTurn) {
@@ -929,7 +912,6 @@ export class PiRpcWorker implements CodexWorker {
     }
 
     activeTurn.interrupted = true;
-    activeTurn.interruptionMessage = context.interruptionMessage ?? "当前任务已被中断。";
     await activeTurn.session.abort();
   }
 
@@ -1078,14 +1060,3 @@ export class PiRpcWorker implements CodexWorker {
   }
 }
 
-function buildPiSteerInput(context: CodexTurnContext): string {
-  return [
-    "Additional user message received while the current turn is still active.",
-    `- Feishu chat: ${context.message.chatId}`,
-    `- New user message id: ${context.message.messageId}`,
-    "- Treat this as the latest instruction and adjust the ongoing turn accordingly.",
-    "",
-    "Latest user message:",
-    context.message.text
-  ].join("\n");
-}
