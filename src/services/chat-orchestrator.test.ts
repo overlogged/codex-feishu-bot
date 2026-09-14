@@ -505,6 +505,85 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
   assert.equal(runStore.list()[0]?.sourceMessageId, "om_group_steer_1");
 });
 
+test("ChatOrchestrator acknowledges a steered message while a long turn is still running", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const existingRun = runStore.create({
+    chatId: "oc_group_1",
+    threadId: "thread_active_1",
+    sourceMessageId: "om_original_1"
+  });
+  const storedRun = runStore.get(existingRun.runId);
+  if (storedRun) {
+    storedRun.startedAt = new Date(Date.now() - 30_000).toISOString();
+  }
+  sessionStore.save({
+    chatId: "oc_group_1",
+    threadId: "thread_active_1",
+    cli: "codex",
+    workspaceId: "/workspace",
+    activeRunId: existingRun.runId,
+    activeTurnId: "turn_active_1",
+    updatedAt: new Date().toISOString()
+  });
+
+  const sentTexts: string[] = [];
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_active_1";
+    },
+    async steerTurn() {
+      return undefined;
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      return;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_ack_1";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver(),
+    createScheduleService(),
+    "/workspace",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      messageId: "om_group_steer_long_1",
+      text: "现在进展怎么样了"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.ok(
+    sentTexts.some((text) => text.includes("已收到你的新消息")),
+    `expected a steer acknowledgement, got: ${JSON.stringify(sentTexts)}`
+  );
+  assert.equal(runStore.list().length, 1);
+});
+
 test("ChatOrchestrator interrupts the active Kimi turn and runs the latest message", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();

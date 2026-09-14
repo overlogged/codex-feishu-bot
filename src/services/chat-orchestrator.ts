@@ -44,6 +44,8 @@ interface LoggerLike {
 }
 
 const WORKSPACE_CATALOG_COMMAND = /^(工作区|workspace|workspaces)$/i;
+// 长任务被 steer 时给用户一个可见回执，避免看起来“没反应”。
+const STEER_ACKNOWLEDGEMENT_THRESHOLD_MS = 15_000;
 const SCHEDULE_COMMAND = /^(定时任务|schedule|schedules)(?:\s+(.+))?$/i;
 const NEW_SESSION_COMMAND = /^(新会话|new\s+session|reset\s+session)$/i;
 const TOOL_CARDS_COMMAND = /^(工具卡片|tool\s*cards?)(?:\s+(开|开启|on|关|关闭|off|状态|status))?$/i;
@@ -1118,6 +1120,11 @@ export class ChatOrchestrator {
       sourceMessageId: message.messageId
     });
 
+    const activeRun = this.runStore.get(messageSession.activeRunId);
+    const activeRunElapsedMs = activeRun
+      ? Date.now() - new Date(activeRun.startedAt).getTime()
+      : 0;
+
     try {
       await this.codexWorker.steerTurn?.({
         session: messageSession,
@@ -1130,6 +1137,17 @@ export class ChatOrchestrator {
         threadId: messageSession.threadId,
         turnId: messageSession.activeTurnId
       });
+
+      if (activeRunElapsedMs >= STEER_ACKNOWLEDGEMENT_THRESHOLD_MS) {
+        await this.sendTextNotice(
+          message.chatId,
+          "已收到你的新消息，正在把它交给当前仍在执行的任务。",
+          {
+            messageId: message.messageId,
+            context: "发送 steer 回执失败"
+          }
+        );
+      }
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
 
