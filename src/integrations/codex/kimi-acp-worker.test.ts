@@ -255,10 +255,13 @@ function createFakeAcpSpawn(
   options: {
     failResume?: boolean;
     hangPromptUntilCancel?: boolean;
+    hangPromptCount?: number;
   } = {}
 ): {
   runtime: KimiAcpRuntime;
+  prompts: Array<{ id: number; text: string }>;
 } {
+  const prompts: Array<{ id: number; text: string }> = [];
   const runtime: KimiAcpRuntime = {
     spawnProcess: () => {
     const stdin = new PassThrough();
@@ -278,7 +281,10 @@ function createFakeAcpSpawn(
       }
     });
 
-    let hangingPromptResolve: (() => void) | undefined;
+    let promptsToHang =
+      options.hangPromptCount ??
+      (options.hangPromptUntilCancel ? Number.POSITIVE_INFINITY : 0);
+    const hangingResolvers = new Map<number, () => void>();
     const write = (message: Record<string, unknown>) => {
       stdout.write(`${JSON.stringify(message)}\n`);
     };
@@ -299,6 +305,7 @@ function createFakeAcpSpawn(
         const message = JSON.parse(line) as {
           id?: number;
           method?: string;
+          params?: { prompt?: Array<{ text?: string }> };
         };
 
         if (message.method === "initialize" && message.id !== undefined) {
@@ -338,10 +345,12 @@ function createFakeAcpSpawn(
 
         if (message.method === "session/prompt" && message.id !== undefined) {
           const id = message.id;
-          if (options.hangPromptUntilCancel) {
-            hangingPromptResolve = () => {
+          prompts.push({ id, text: message.params?.prompt?.[0]?.text ?? "" });
+          if (promptsToHang > 0) {
+            promptsToHang -= 1;
+            hangingResolvers.set(id, () => {
               write({ jsonrpc: "2.0", id, result: { stopReason: "cancelled" } });
-            };
+            });
             continue;
           }
 
@@ -367,8 +376,10 @@ function createFakeAcpSpawn(
         }
 
         if (message.method === "session/cancel") {
-          hangingPromptResolve?.();
-          hangingPromptResolve = undefined;
+          for (const resolve of hangingResolvers.values()) {
+            resolve();
+          }
+          hangingResolvers.clear();
           continue;
         }
       }
@@ -383,7 +394,7 @@ function createFakeAcpSpawn(
     }
   };
 
-  return { runtime };
+  return { runtime, prompts };
 }
 
 function buildMessage(): IncomingChatMessage {
@@ -493,6 +504,54 @@ test("KimiAcpWorker interrupt cancels the in-flight prompt without an error even
   assert.ok(
     !events.some((event) => event.kind === "error"),
     `cancelled turn should not emit error events: ${JSON.stringify(events)}`
+  );
+
+  await worker.close();
+});
+
+test("KimiAcpWorker waits for the active turn before sending the next prompt", async () => {
+  const { runtime, prompts } = createFakeAcpSpawn({ hangPromptCount: 1 });
+  const worker = new KimiAcpWorker({ KIMI_ACP_COMMAND: "kimi" }, undefined, runtime);
+  const activeTurns = () =>
+    (worker as unknown as { activeTurns: Map<string, unknown> }).activeTurns;
+
+  const firstEventsPromise = collectEvents(worker, "session_existing_1");
+
+  let turnId: string | undefined;
+  for (let attempt = 0; attempt < 100 && !turnId; attempt += 1) {
+    turnId = Array.from(activeTurns().keys())[0];
+    if (!turnId) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assert.ok(turnId, "first turn should be registered");
+  assert.equal(prompts.length, 1);
+
+  // 第二个 turn 必须等第一个 turn 结束，否则 ACP 会报 another turn is already in progress。
+  const secondEventsPromise = collectEvents(worker, "session_existing_1");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(prompts.length, 1);
+
+  await worker.interruptTurn({
+    cli: "kimi",
+    workspaceId: "/tmp",
+    message: buildMessage(),
+    threadId: "session_existing_1",
+    turnId,
+    interruptionMessage: "当前任务已被后续消息中断。"
+  });
+
+  const [firstEvents, secondEvents] = await Promise.all([
+    firstEventsPromise,
+    secondEventsPromise
+  ]);
+  assert.equal(prompts.length, 2);
+  assert.ok(!firstEvents.some((event) => event.kind === "error"));
+  assert.ok(
+    secondEvents.some(
+      (event) => event.kind === "assistant_message_completed" && event.text === "处理完了。"
+    ),
+    `second turn should complete normally: ${JSON.stringify(secondEvents)}`
   );
 
   await worker.close();

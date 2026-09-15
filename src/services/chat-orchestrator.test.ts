@@ -2338,6 +2338,82 @@ test("ChatOrchestrator routes scheduled tasks into the active session", async ()
   assert.equal(steerCalls, 1);
 });
 
+test("ChatOrchestrator skips a scheduled task while a non-steerable turn is active", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const existingRun = runStore.create({
+    chatId: "oc_group_1",
+    threadId: "thread_active_kimi",
+    sourceMessageId: "om_original_1"
+  });
+  sessionStore.save({
+    chatId: "oc_group_1",
+    threadId: "thread_active_kimi",
+    cli: "kimi",
+    workspaceId: "/home/overlogged/Quant",
+    activeRunId: existingRun.runId,
+    activeTurnId: "turn_active_kimi_1",
+    updatedAt: new Date().toISOString()
+  });
+
+  let runTurnCalls = 0;
+  let interruptCalls = 0;
+  const codexWorker: CodexWorker = {
+    supportsSteer() {
+      return false;
+    },
+    async ensureThread() {
+      return "thread_active_kimi";
+    },
+    async interruptTurn() {
+      interruptCalls += 1;
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient(),
+    createNoopDeliveryService(),
+    projector,
+    codexWorker,
+    createWorkspaceResolver({
+      async resolve() {
+        return {
+          ok: true,
+          workspaceId: "/home/overlogged/Quant",
+          cli: "kimi"
+        };
+      }
+    }),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger()
+  );
+
+  const result = await orchestrator.triggerScheduledTask({
+    chatId: "oc_group_1",
+    taskId: "2",
+    cron: "0 9 * * 1-5",
+    prompt: "生成工作日报",
+    status: "enabled",
+    createdAt: "2026-04-04T00:00:00.000Z",
+    updatedAt: "2026-04-04T00:00:00.000Z",
+    nextRunAt: "2026-04-04T01:00:00.000Z"
+  });
+
+  assert.deepEqual(result, { outcome: "busy" });
+  assert.equal(runTurnCalls, 0);
+  assert.equal(interruptCalls, 0);
+  assert.equal(existingRun.runId, runStore.list()[0]?.runId);
+});
+
 test("ChatOrchestrator creates a fresh session when asked", async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();

@@ -1290,27 +1290,45 @@ export class ChatOrchestrator {
 
     if (
       existingSession?.activeRunId &&
-      this.canSteer({
-        session: existingSession,
-        cli: workspaceResolution.cli,
-        workspaceId: workspaceResolution.workspaceId,
-        provider: workspaceResolution.provider,
-        model: workspaceResolution.model,
-        thinking: workspaceResolution.thinking,
-        message
-      }) &&
       existingSession.workspaceId === workspaceResolution.workspaceId &&
       existingSession.cli === workspaceResolution.cli
     ) {
-      await this.dispatchActiveOrNew(existingSession, message, {
-        cli: workspaceResolution.cli,
-        workspaceId: workspaceResolution.workspaceId,
-        provider: workspaceResolution.provider,
-        model: workspaceResolution.model,
-        thinking: workspaceResolution.thinking
-      });
+      if (
+        this.canSteer({
+          session: existingSession,
+          cli: workspaceResolution.cli,
+          workspaceId: workspaceResolution.workspaceId,
+          provider: workspaceResolution.provider,
+          model: workspaceResolution.model,
+          thinking: workspaceResolution.thinking,
+          message
+        })
+      ) {
+        await this.dispatchActiveOrNew(existingSession, message, {
+          cli: workspaceResolution.cli,
+          workspaceId: workspaceResolution.workspaceId,
+          provider: workspaceResolution.provider,
+          model: workspaceResolution.model,
+          thinking: workspaceResolution.thinking
+        });
+        return {
+          outcome: "triggered"
+        };
+      }
+
+      // CLI 不支持 steer（例如 Kimi ACP）时不要并发起新 turn，否则会被
+      // 拒绝为 "another turn is already in progress"。交给下一个轮询周期重试。
+      this.logger?.info(
+        {
+          chatId: task.chatId,
+          taskId: task.taskId,
+          cli: workspaceResolution.cli,
+          activeRunId: existingSession.activeRunId
+        },
+        "定时任务触发时该群仍有活跃任务且 CLI 不支持 steer，本轮跳过"
+      );
       return {
-        outcome: "triggered"
+        outcome: "busy"
       };
     }
 

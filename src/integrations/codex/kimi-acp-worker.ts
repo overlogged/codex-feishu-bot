@@ -446,6 +446,7 @@ class KimiAcpSession {
   private readonly readline: ReadlineInterface;
   private initialized = false;
   private closed = false;
+  private activePrompt?: Promise<{ stopReason?: string }>;
   sessionId?: string;
 
   private readonly child: KimiAcpChild;
@@ -544,7 +545,25 @@ class KimiAcpSession {
       return Promise.reject(new Error("Kimi ACP 会话还没有 sessionId。"));
     }
 
-    return this.request("session/prompt", {
+    const run = this.runPrompt(text);
+    const tracked = run.finally(() => {
+      if (this.activePrompt === tracked) {
+        this.activePrompt = undefined;
+      }
+    });
+    this.activePrompt = tracked;
+    return tracked;
+  }
+
+  private async runPrompt(text: string): Promise<{ stopReason?: string }> {
+    // ACP 同一 session 不允许并发 prompt，否则 agent 会返回
+    // "another turn is already in progress"。这里串行化，保证上一个 turn 结束后再发。
+    const previous = this.activePrompt;
+    if (previous) {
+      await previous.catch(() => undefined);
+    }
+
+    return (await this.request("session/prompt", {
       sessionId: this.sessionId,
       prompt: [
         {
@@ -552,7 +571,25 @@ class KimiAcpSession {
           text
         }
       ]
-    }) as Promise<{ stopReason?: string }>;
+    })) as { stopReason?: string };
+  }
+
+  hasActivePrompt(): boolean {
+    return this.activePrompt !== undefined;
+  }
+
+  async waitForIdle(timeoutMs = 15_000): Promise<void> {
+    const active = this.activePrompt;
+    if (!active) {
+      return;
+    }
+
+    await Promise.race([
+      active.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, timeoutMs).unref();
+      })
+    ]);
   }
 
   cancel(): void {
@@ -717,6 +754,9 @@ export class KimiAcpWorker implements CodexWorker {
 
     activeTurn.interrupted = true;
     activeTurn.session.cancel();
+    // 等 in-flight turn 真的结束，否则紧随其后的新 prompt 会被 ACP 拒绝为
+    // "another turn is already in progress"。
+    await activeTurn.session.waitForIdle();
   }
 
   async *runTurn(
@@ -746,6 +786,8 @@ export class KimiAcpWorker implements CodexWorker {
     };
 
     const session = await this.getOrCreateSession(context);
+    // 会话可能还有未结束的 turn（例如刚被 cancel 还在收尾），等它退出后再接管事件处理器并发新 prompt。
+    await session.waitForIdle();
     const sessionId = await session.ensureSession(context.threadId);
     yield {
       kind: "thread_bound",
