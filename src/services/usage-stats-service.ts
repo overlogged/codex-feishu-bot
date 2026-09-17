@@ -8,6 +8,11 @@ import type {
   CodexWorker
 } from "../integrations/codex/codex-worker.js";
 import type { KimiQuota, KimiQuotaWindow } from "../integrations/kimi/kimi-quota-client.js";
+import type {
+  UsageSnapshot,
+  UsageSnapshotCliTotals,
+  UsageSnapshotStore
+} from "../stores/usage-snapshot-store.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -23,6 +28,8 @@ export interface UsageStatsServiceConfig {
   ccusageCommand: string;
   cacheMs: number;
   usdToCnyRate: number;
+  /** 记录当日累计用量快照的间隔，用于估算「近 1 小时」消耗。 */
+  snapshotIntervalMs?: number;
 }
 
 export type UsageStatsCommandRunner = (command: string, args: string[]) => Promise<string>;
@@ -47,6 +54,16 @@ interface CcusageMonthlySummary {
   totalCost: number | null;
   topModels: CcusageModelBreakdown[];
 }
+
+interface CcusageDailySummary {
+  date: string;
+  totalTokens: number | null;
+  totalCost: number | null;
+  topModels: CcusageModelBreakdown[];
+}
+
+const RECENT_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 
 const CCUSAGE_CLIS = ["codex", "claude", "kimi", "pi"] as const;
 
@@ -238,6 +255,47 @@ function parseCcusageModelBreakdowns(entry: Record<string, unknown>): CcusageMod
     .slice(0, 3);
 }
 
+function parseCcusageDaily(stdout: string): CcusageDailySummary[] {
+  const parsed = asRecord(JSON.parse(stdout));
+  if (!parsed || !Array.isArray(parsed.daily)) {
+    return [];
+  }
+
+  const summaries: CcusageDailySummary[] = [];
+  for (const item of parsed.daily) {
+    const entry = asRecord(item);
+    if (!entry) {
+      continue;
+    }
+
+    const date =
+      typeof entry.date === "string" && entry.date
+        ? entry.date
+        : typeof entry.period === "string" && entry.period
+          ? entry.period
+          : undefined;
+    if (!date) {
+      continue;
+    }
+
+    summaries.push({
+      date,
+      totalTokens: numberOrNull(entry.totalTokens),
+      totalCost: numberOrNull(entry.totalCost) ?? numberOrNull(entry.costUSD),
+      topModels: parseCcusageModelBreakdowns(entry)
+    });
+  }
+
+  return summaries;
+}
+
+function localDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function parseCcusageMonthly(stdout: string): CcusageMonthlySummary[] {
   const parsed = asRecord(JSON.parse(stdout));
   if (!parsed || !Array.isArray(parsed.monthly)) {
@@ -268,34 +326,69 @@ export class UsageStatsService {
   private readonly usdToCnyRate: number;
   private readonly commandRunner: UsageStatsCommandRunner;
   private readonly kimiQuotaClient?: KimiQuotaReader;
+  private readonly snapshotIntervalMs: number;
   private ccusageCache:
     | {
         expiresAt: number;
         summaries: Map<string, CcusageMonthlySummary[] | null>;
       }
     | undefined;
+  private ccusageDailyCache:
+    | {
+        expiresAt: number;
+        summaries: Map<string, CcusageDailySummary[] | null>;
+      }
+    | undefined;
+  private ccusageDailyInflight?: Promise<Map<string, CcusageDailySummary[] | null>>;
+  private snapshotTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly codexWorker: CodexWorker,
     config: UsageStatsServiceConfig,
     private readonly logger?: LoggerLike,
     commandRunner?: UsageStatsCommandRunner,
-    kimiQuotaClient?: KimiQuotaReader
+    kimiQuotaClient?: KimiQuotaReader,
+    private readonly snapshotStore?: UsageSnapshotStore
   ) {
     this.ccusageCommand = config.ccusageCommand;
     this.cacheMs = config.cacheMs;
     this.usdToCnyRate = config.usdToCnyRate;
+    this.snapshotIntervalMs = config.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
     this.commandRunner = commandRunner ?? defaultCommandRunner;
     this.kimiQuotaClient = kimiQuotaClient;
   }
 
+  start(): void {
+    if (!this.snapshotStore || this.snapshotTimer) {
+      return;
+    }
+
+    void this.recordUsageSnapshot();
+    this.snapshotTimer = setInterval(() => {
+      void this.recordUsageSnapshot();
+    }, this.snapshotIntervalMs);
+    this.snapshotTimer.unref?.();
+  }
+
+  stop(): void {
+    if (this.snapshotTimer) {
+      clearInterval(this.snapshotTimer);
+      this.snapshotTimer = undefined;
+    }
+  }
+
   async buildReport(): Promise<string> {
+    // 提前触发按天统计，让 ccusage daily 和 monthly 并发，而不是串行等待。
+    const dailyLoad = this.loadCcusageDailySummaries();
     const [rateLimitsLines, kimiQuotaLines, accountUsageLines, ccusageLines] = await Promise.all([
       this.buildRateLimitsSection(),
       this.buildKimiQuotaSection(),
       this.buildAccountUsageSection(),
       this.buildCcusageSection()
     ]);
+    await dailyLoad;
+    const todayLines = await this.buildTodaySection();
+    const recentLines = await this.buildRecentHourSection();
 
     return [
       "额度与用量统计",
@@ -307,10 +400,28 @@ export class UsageStatsService {
       ...kimiQuotaLines,
       ...(accountUsageLines ? ["", "【Codex 累计用量】", ...accountUsageLines] : []),
       "",
+      "【今日消耗（ccusage，自然日）】",
+      ...todayLines,
+      "",
+      "【近 1 小时消耗（估算）】",
+      ...recentLines,
+      "",
       "【各 CLI 历史用量（本月，ccusage）】",
       ...ccusageLines,
       "",
       `费用为 ccusage 按公开定价估算（USD 按汇率 ${this.usdToCnyRate} 折算为人民币），仅供参考。`
+    ].join("\n");
+  }
+
+  /** 每日 token 消耗日报（只包含当天用量，适合定时推送）。 */
+  async buildDailyReport(): Promise<string> {
+    const lines = await this.buildTodaySection();
+    return [
+      `Token 消耗日报（${localDateKey()}）`,
+      "",
+      ...lines,
+      "",
+      `数据来源：ccusage（按自然日统计，费用为公开定价估算，USD 按汇率 ${this.usdToCnyRate} 折算为人民币）。`
     ].join("\n");
   }
 
@@ -465,6 +576,210 @@ export class UsageStatsService {
     }
 
     return lines.length > 0 ? lines : ["ccusage 不可用或暂无历史用量"];
+  }
+
+  private async buildTodaySection(): Promise<string[]> {
+    const summaries = await this.loadCcusageDailySummaries();
+    const today = localDateKey();
+    const lines: string[] = [];
+    let totalTokens = 0;
+    let totalCost = 0;
+    let hasTokens = false;
+    let hasCost = false;
+
+    for (const cli of CCUSAGE_CLIS) {
+      const rows = summaries.get(cli);
+      if (!rows) {
+        continue;
+      }
+
+      const row = rows.find((entry) => entry.date === today);
+      if (!row) {
+        continue;
+      }
+
+      if (typeof row.totalTokens === "number") {
+        totalTokens += row.totalTokens;
+        hasTokens = true;
+      }
+      if (typeof row.totalCost === "number") {
+        totalCost += row.totalCost;
+        hasCost = true;
+      }
+
+      lines.push(
+        `${renderCliLabel(cli)}：${formatTokenCount(row.totalTokens)} token${
+          row.totalCost !== null ? `，估算费用 ${this.formatCny(row.totalCost)}` : ""
+        }`
+      );
+    }
+
+    if (lines.length === 0) {
+      return ["ccusage 不可用或今天暂无用量"];
+    }
+
+    lines.push(
+      `合计：${formatTokenCount(hasTokens ? totalTokens : null)} token${
+        hasCost ? `，估算费用 ${this.formatCny(totalCost)}` : ""
+      }`
+    );
+    return lines;
+  }
+
+  private async buildTodayTotals(): Promise<Record<string, UsageSnapshotCliTotals> | null> {
+    const summaries = await this.loadCcusageDailySummaries();
+    const today = localDateKey();
+    const totals: Record<string, UsageSnapshotCliTotals> = {};
+    let any = false;
+
+    for (const cli of CCUSAGE_CLIS) {
+      const rows = summaries.get(cli);
+      if (!rows) {
+        continue;
+      }
+
+      const row = rows.find((entry) => entry.date === today);
+      totals[cli] = row
+        ? { tokens: row.totalTokens, cost: row.totalCost }
+        : { tokens: 0, cost: 0 };
+      any = any || (row?.totalTokens ?? null) !== null || (row?.totalCost ?? null) !== null;
+    }
+
+    return any ? totals : null;
+  }
+
+  private async recordUsageSnapshot(): Promise<void> {
+    if (!this.snapshotStore) {
+      return;
+    }
+
+    try {
+      await this.snapshotStore.load();
+      const totals = await this.buildTodayTotals();
+      if (!totals) {
+        return;
+      }
+
+      const snapshot: UsageSnapshot = {
+        at: new Date().toISOString(),
+        totals
+      };
+      await this.snapshotStore.record(snapshot);
+    } catch (error) {
+      this.logger?.warn(
+        {
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "记录用量快照失败"
+      );
+    }
+  }
+
+  private async buildRecentHourSection(): Promise<string[]> {
+    if (!this.snapshotStore) {
+      return ["用量快照未启用，无法估算近 1 小时消耗。"];
+    }
+
+    // 先记录当前快照，保证累计值是最新的，再和约 1 小时前的快照做差。
+    await this.recordUsageSnapshot();
+    const current = await this.buildTodayTotals();
+    if (!current) {
+      return ["ccusage 不可用，无法估算近 1 小时消耗。"];
+    }
+
+    const now = Date.now();
+    const target = now - RECENT_WINDOW_MS;
+    const today = localDateKey();
+    const candidates = this.snapshotStore
+      .list()
+      .filter((snapshot) => localDateKey(new Date(snapshot.at)) === today)
+      .filter((snapshot) => {
+        const at = new Date(snapshot.at).getTime();
+        return Number.isFinite(at) && at <= now - 45 * 60 * 1000;
+      });
+
+    if (candidates.length === 0) {
+      return ["需要累计约 1 小时的运行快照后才能估算，请稍后再试。"];
+    }
+
+    const reference = candidates.reduce((best, snapshot) => {
+      const diff = Math.abs(new Date(snapshot.at).getTime() - target);
+      const bestDiff = Math.abs(new Date(best.at).getTime() - target);
+      return diff < bestDiff ? snapshot : best;
+    });
+
+    const lines: string[] = [];
+    let total = 0;
+    for (const cli of CCUSAGE_CLIS) {
+      const nowTokens = current[cli]?.tokens ?? null;
+      const beforeTokens = reference.totals[cli]?.tokens ?? null;
+      if (nowTokens === null || beforeTokens === null) {
+        continue;
+      }
+
+      const delta = Math.max(0, nowTokens - beforeTokens);
+      total += delta;
+      lines.push(`${renderCliLabel(cli)}：${formatTokenCount(delta)} token`);
+    }
+
+    if (lines.length === 0) {
+      return ["近 1 小时暂无可估算数据"];
+    }
+
+    lines.push(`合计：${formatTokenCount(total)} token`);
+    return lines;
+  }
+
+  private loadCcusageDailySummaries(): Promise<Map<string, CcusageDailySummary[] | null>> {
+    if (this.ccusageDailyCache && this.ccusageDailyCache.expiresAt > Date.now()) {
+      return Promise.resolve(this.ccusageDailyCache.summaries);
+    }
+
+    if (this.ccusageDailyInflight) {
+      return this.ccusageDailyInflight;
+    }
+
+    const load = (async () => {
+      const summaries = new Map<string, CcusageDailySummary[] | null>();
+      await Promise.all(
+        CCUSAGE_CLIS.map(async (cli) => {
+          summaries.set(cli, await this.fetchCcusageDaily(cli));
+        })
+      );
+      this.ccusageDailyCache = {
+        expiresAt: Date.now() + this.cacheMs,
+        summaries
+      };
+      return summaries;
+    })();
+
+    this.ccusageDailyInflight = load;
+    void load.finally(() => {
+      if (this.ccusageDailyInflight === load) {
+        this.ccusageDailyInflight = undefined;
+      }
+    });
+    return load;
+  }
+
+  private async fetchCcusageDaily(cli: string): Promise<CcusageDailySummary[] | null> {
+    try {
+      const stdout = await this.commandRunner(this.ccusageCommand, [cli, "daily", "--json"]);
+      if (!stdout.trim()) {
+        return null;
+      }
+
+      return parseCcusageDaily(stdout);
+    } catch (error) {
+      this.logger?.warn(
+        {
+          cli,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "ccusage 日记用量读取失败，跳过该 CLI"
+      );
+      return null;
+    }
   }
 
   private async loadCcusageSummaries(): Promise<Map<string, CcusageMonthlySummary[] | null>> {

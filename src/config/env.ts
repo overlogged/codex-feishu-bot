@@ -83,6 +83,10 @@ const envSchema = z.object({
   CCUSAGE_COMMAND: z.string().default("ccusage"),
   USAGE_CCUSAGE_CACHE_MS: z.coerce.number().int().positive().default(300000),
   USAGE_USD_TO_CNY_RATE: z.coerce.number().positive().default(7.2),
+  USAGE_SNAPSHOT_FILE: z.string().default(".codex-feishu-bot/usage-snapshots.json"),
+  USAGE_SNAPSHOT_INTERVAL_MS: z.coerce.number().int().positive().default(600000),
+  /** 每日 token 消耗日报默认发送时间（HH:mm，本地时区）。 */
+  TOKEN_DAILY_REPORT_TIME: z.string().default("23:00"),
   KIMI_CODE_CREDENTIALS_FILE: z
     .string()
     .default(join(homedir(), ".kimi-code", "credentials", "kimi-code.json")),
@@ -113,6 +117,7 @@ export function readEnv(): Env {
       ? resolveDir(process.cwd(), parsed.CODEX_APP_SERVER_WS_TOKEN_FILE)
       : undefined,
     CHAT_WORKSPACE_BINDINGS_FILE: resolveDir(defaultWorkspace, parsed.CHAT_WORKSPACE_BINDINGS_FILE),
+    USAGE_SNAPSHOT_FILE: resolveDir(defaultWorkspace, parsed.USAGE_SNAPSHOT_FILE),
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
     RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE),
     FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT),

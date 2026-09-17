@@ -37,6 +37,7 @@ import {
   type SessionResumeCliCommands
 } from "./session-resume-command.js";
 import { UsageStatsService } from "./usage-stats-service.js";
+import { formatTimeOfDay, parseTimeOfDay } from "./token-daily-report-service.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -53,6 +54,52 @@ const TOOL_CARDS_COMMAND = /^(工具卡片|tool\s*cards?)(?:\s+(开|开启|on|�
 const QUOTA_COMMAND = /^(额度|余量|用量|token|tokens|usage|quota|stats)$/i;
 
 type ToolCardsCommandAction = "on" | "off" | "status";
+
+type TokenDailyReportCommand =
+  | { action: "status" }
+  | { action: "on" }
+  | { action: "off" }
+  | { action: "set_time"; time: string };
+
+const TOKEN_DAILY_REPORT_COMMAND =
+  /^(?:(打开|开启|启用|关闭|停用|取消|设置|修改|调整)\s*)?(?:token|tokens|额度|用量|消耗)\s*(?:日报|报告|daily)(?:\s*(?:时间|发送时间))?(?:\s*(开|开启|打开|启用|on|关|关闭|停用|取消|off|状态|status))?(?:\s*(\d{1,2}:\d{2}))?$/i;
+
+/**
+ * 只识别「整句就是 token 日报指令」的消息，避免群里的普通任务消息因为
+ * 提到“token 日报”被误判成开关指令。
+ */
+export function parseTokenDailyReportCommand(
+  message: IncomingChatMessage
+): TokenDailyReportCommand | undefined {
+  const text = stripMentions(message.text).trim();
+  if (!text || text.length > 40) {
+    return undefined;
+  }
+
+  const matched = text.match(TOKEN_DAILY_REPORT_COMMAND);
+  if (!matched) {
+    return undefined;
+  }
+
+  const leading = (matched[1] ?? "").toLowerCase();
+  const trailing = (matched[2] ?? "").toLowerCase();
+  const time = matched[3];
+  const verb = leading || trailing;
+
+  if (["关闭", "停用", "取消", "off"].includes(verb)) {
+    return { action: "off" };
+  }
+
+  if (["打开", "开启", "启用", "on"].includes(verb)) {
+    return { action: "on" };
+  }
+
+  if (time) {
+    return { action: "set_time", time };
+  }
+
+  return { action: "status" };
+}
 
 function parseToolCardsCommand(message: IncomingChatMessage): ToolCardsCommandAction | undefined {
   const matched = stripMentions(message.text).trim().match(TOOL_CARDS_COMMAND);
@@ -617,7 +664,8 @@ export class ChatOrchestrator {
       }
     },
     private readonly resumeCliCommands: SessionResumeCliCommands = {},
-    private readonly usageStatsService?: UsageStatsService
+    private readonly usageStatsService?: UsageStatsService,
+    private readonly tokenDailyReportDefaultTime = "23:00"
   ) {}
 
   enqueue(message: IncomingChatMessage): void {
@@ -1357,6 +1405,15 @@ export class ChatOrchestrator {
       return true;
     }
 
+    const tokenReportCommand =
+      message.chatType !== "group" || message.mentionsBot
+        ? parseTokenDailyReportCommand(message)
+        : undefined;
+    if (tokenReportCommand) {
+      await this.handleTokenDailyReportCommand(message, tokenReportCommand);
+      return true;
+    }
+
     if (message.chatType === "group" && message.mentionsBot) {
       await this.handleGroupMentionControlMessage(message);
       return true;
@@ -1420,6 +1477,92 @@ export class ChatOrchestrator {
       }
     );
     return true;
+  }
+
+  private async handleTokenDailyReportCommand(
+    message: IncomingChatMessage,
+    command: TokenDailyReportCommand
+  ): Promise<void> {
+    const session = this.sessionStore.get(message.chatId);
+    const defaultTime = this.tokenDailyReportDefaultTime;
+
+    if (command.action === "status") {
+      const enabled = session?.tokenDailyReportEnabled === true;
+      const time = formatTimeOfDay(session?.tokenDailyReportTime, defaultTime);
+      await this.sendTextNotice(
+        message.chatId,
+        [
+          `这个会话的 token 日报当前是${enabled ? "开启" : "关闭"}状态（默认关闭）。`,
+          `发送时间：${time}（本地时区）。`,
+          "发送“打开 token 日报”“关闭 token 日报”，或“token 日报 23:30”调整时间。"
+        ].join("\n"),
+        {
+          messageId: message.messageId,
+          context: "发送 token 日报状态提示失败"
+        }
+      );
+      return;
+    }
+
+    if (!session) {
+      await this.sendTextNotice(
+        message.chatId,
+        "这个会话还没有任务记录，先绑定工作区或先聊一句，再设置 token 日报开关。",
+        {
+          messageId: message.messageId,
+          context: "发送 token 日报设置提示失败"
+        }
+      );
+      return;
+    }
+
+    if (command.action === "set_time") {
+      if (!parseTimeOfDay(command.time)) {
+        await this.sendTextNotice(message.chatId, "时间格式不正确，请用 HH:mm，例如 23:30。", {
+          messageId: message.messageId,
+          context: "发送 token 日报设置提示失败"
+        });
+        return;
+      }
+
+      const time = formatTimeOfDay(command.time, defaultTime);
+      this.sessionStore.save({
+        ...session,
+        tokenDailyReportTime: time,
+        updatedAt: new Date().toISOString()
+      });
+      await this.sendTextNotice(
+        message.chatId,
+        `已把 token 日报发送时间设为 ${time}（本地时区）。`,
+        {
+          messageId: message.messageId,
+          context: "发送 token 日报设置提示失败"
+        }
+      );
+      return;
+    }
+
+    const enabled = command.action === "on";
+    this.sessionStore.save({
+      ...session,
+      tokenDailyReportEnabled: enabled,
+      tokenDailyReportTime: session.tokenDailyReportTime ?? defaultTime,
+      tokenDailyReportLastSentDate: enabled ? session.tokenDailyReportLastSentDate : undefined,
+      updatedAt: new Date().toISOString()
+    });
+    await this.sendTextNotice(
+      message.chatId,
+      enabled
+        ? `已为这个会话开启 token 日报，每天 ${formatTimeOfDay(
+            session.tokenDailyReportTime,
+            defaultTime
+          )} 会发送当天的 token 消耗。`
+        : "已为这个会话关闭 token 日报。",
+      {
+        messageId: message.messageId,
+        context: "发送 token 日报设置提示失败"
+      }
+    );
   }
 
   private async handleQuotaCommand(message: IncomingChatMessage): Promise<void> {

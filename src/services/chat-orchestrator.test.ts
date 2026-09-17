@@ -16,7 +16,7 @@ import { ConversationStore } from "../stores/conversation-store.js";
 import { RunStore } from "../stores/run-store.js";
 import { SessionStore } from "../stores/session-store.js";
 import type { ChatWorkspaceResolver } from "./chat-workspace-resolver.js";
-import { ChatOrchestrator } from "./chat-orchestrator.js";
+import { ChatOrchestrator, parseTokenDailyReportCommand } from "./chat-orchestrator.js";
 import type { GroupControlAgent, GroupControlIntent } from "./group-control-agent.js";
 import { MessageProjector } from "./message-projector.js";
 import { UsageStatsService } from "./usage-stats-service.js";
@@ -987,6 +987,131 @@ test("ChatOrchestrator toggles tool card delivery per session with the 工具卡
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(sessionStore.get("oc_p2p_1")?.toolCardsEnabled, false);
   assert.match(sentTexts[2] ?? "", /已为这个会话关闭工具卡片推送/);
+});
+
+test("ChatOrchestrator toggles the token daily report per session", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+
+  sessionStore.save({
+    chatId: "oc_p2p_token",
+    chatType: "p2p",
+    threadId: "thread_p2p_token",
+    cli: "codex",
+    workspaceId: "/home/overlogged",
+    updatedAt: new Date().toISOString()
+  });
+
+  const codexWorker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      return undefined;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_token_report";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver({}),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    undefined,
+    undefined,
+    undefined,
+    "23:00"
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_token",
+      chatType: "p2p",
+      messageId: "om_token_report_status_1",
+      text: "token日报"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.match(sentTexts[0] ?? "", /当前是关闭状态/);
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_token",
+      chatType: "p2p",
+      messageId: "om_token_report_on_1",
+      text: "打开 token 日报"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sessionStore.get("oc_p2p_token")?.tokenDailyReportEnabled, true);
+  assert.match(sentTexts[1] ?? "", /已为这个会话开启 token 日报/);
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_token",
+      chatType: "p2p",
+      messageId: "om_token_report_time_1",
+      text: "token 日报 08:30"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sessionStore.get("oc_p2p_token")?.tokenDailyReportTime, "08:30");
+  assert.match(sentTexts[2] ?? "", /已把 token 日报发送时间设为 08:30/);
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_token",
+      chatType: "p2p",
+      messageId: "om_token_report_off_1",
+      text: "关闭 token 日报"
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sessionStore.get("oc_p2p_token")?.tokenDailyReportEnabled, false);
+  assert.match(sentTexts[3] ?? "", /已为这个会话关闭 token 日报/);
+});
+
+test("parseTokenDailyReportCommand only matches command-shaped messages", () => {
+  assert.deepEqual(parseTokenDailyReportCommand(createMessage({ text: "token日报" })), {
+    action: "status"
+  });
+  assert.deepEqual(
+    parseTokenDailyReportCommand(createMessage({ text: "@_user_1 打开 token 日报" })),
+    { action: "on" }
+  );
+  assert.deepEqual(
+    parseTokenDailyReportCommand(createMessage({ text: "@_user_1 关闭 token 日报" })),
+    { action: "off" }
+  );
+  assert.deepEqual(parseTokenDailyReportCommand(createMessage({ text: "token 日报 08:30" })), {
+    action: "set_time",
+    time: "08:30"
+  });
+  assert.equal(
+    parseTokenDailyReportCommand(createMessage({ text: "帮我看看 token 日报生成脚本" })),
+    undefined
+  );
 });
 
 test("ChatOrchestrator asks for a session before setting the tool cards switch", async () => {

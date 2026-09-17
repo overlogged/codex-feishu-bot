@@ -32,6 +32,11 @@ export interface ChatSession {
   activeRunId?: string;
   activeTurnId?: string;
   toolCardsEnabled?: boolean;
+  tokenDailyReportEnabled?: boolean;
+  /** 每日 token 日报发送时间，格式 HH:mm（本地时区）。 */
+  tokenDailyReportTime?: string;
+  /** 最近一次已发送日报的本地日期，格式 YYYY-MM-DD。 */
+  tokenDailyReportLastSentDate?: string;
   lastInboundAt?: string;
   lastSenderId?: string;
   lastSenderName?: string;

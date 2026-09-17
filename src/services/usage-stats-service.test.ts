@@ -7,6 +7,7 @@ import type {
   CodexWorker
 } from "../integrations/codex/codex-worker.js";
 import type { KimiQuota } from "../integrations/kimi/kimi-quota-client.js";
+import { UsageSnapshotStore } from "../stores/usage-snapshot-store.js";
 import {
   collectRateLimitWindows,
   formatTokenCount,
@@ -107,6 +108,24 @@ function ccusageMonthlyFixture(): string {
             cost: 2.5
           }
         ]
+      }
+    ]
+  });
+}
+
+function localDateKey(date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function ccusageDailyFixture(totalTokens = 1_000_000, costUSD = 1): string {
+  return JSON.stringify({
+    daily: [
+      {
+        date: localDateKey(),
+        totalTokens,
+        costUSD
       }
     ]
   });
@@ -298,7 +317,73 @@ test("UsageStatsService skips failing CLIs and caches ccusage results", async ()
   assert.doesNotMatch(report, /Pi（/);
 
   await service.buildReport();
-  assert.equal(calls.length, 4);
+  // 每个月度 + 每天各一次（4 个 CLI），第二次调用命中缓存
+  assert.equal(calls.length, 8);
+});
+
+test("UsageStatsService renders today's consumption and estimates the last hour", async () => {
+  const snapshotStore = new UsageSnapshotStore();
+  const hourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  await snapshotStore.record({
+    at: hourAgo,
+    totals: {
+      codex: { tokens: 400_000, cost: 0.4 },
+      claude: { tokens: 400_000, cost: 0.4 },
+      kimi: { tokens: 400_000, cost: 0.4 },
+      pi: { tokens: 400_000, cost: 0.4 }
+    }
+  });
+
+  const commandRunner: UsageStatsCommandRunner = async (_command, args) => {
+    return args[1] === "daily" ? ccusageDailyFixture() : ccusageMonthlyFixture();
+  };
+  const service = new UsageStatsService(
+    createWorker(),
+    defaultConfig,
+    createLogger(),
+    commandRunner,
+    undefined,
+    snapshotStore
+  );
+
+  const report = await service.buildReport();
+
+  assert.match(report, /【今日消耗（ccusage，自然日）】/);
+  assert.match(report, /Codex：100\.0 万 token，估算费用 ¥7\.20/);
+  assert.match(report, /合计：400\.0 万 token/);
+  assert.match(report, /【近 1 小时消耗（估算）】/);
+  assert.match(report, /Codex：60\.0 万 token/);
+  assert.match(report, /合计：240\.0 万 token/);
+});
+
+test("UsageStatsService reports when the hourly estimate needs more history", async () => {
+  const snapshotStore = new UsageSnapshotStore();
+  const commandRunner: UsageStatsCommandRunner = async (_command, args) => {
+    return args[1] === "daily" ? ccusageDailyFixture() : ccusageMonthlyFixture();
+  };
+  const service = new UsageStatsService(
+    createWorker(),
+    defaultConfig,
+    createLogger(),
+    commandRunner,
+    undefined,
+    snapshotStore
+  );
+
+  const report = await service.buildReport();
+  assert.match(report, /需要累计约 1 小时的运行快照后才能估算/);
+});
+
+test("UsageStatsService builds a daily token report", async () => {
+  const commandRunner: UsageStatsCommandRunner = async (_command, args) => {
+    return args[1] === "daily" ? ccusageDailyFixture(2_000_000, 2) : ccusageMonthlyFixture();
+  };
+  const service = new UsageStatsService(createWorker(), defaultConfig, createLogger(), commandRunner);
+
+  const report = await service.buildDailyReport();
+  assert.match(report, new RegExp(`Token 消耗日报（${localDateKey()}）`));
+  assert.match(report, /Codex：200\.0 万 token，估算费用 ¥14\.40/);
+  assert.match(report, /数据来源：ccusage/);
 });
 
 test("collectRateLimitWindows dedupes snapshots shared between rateLimits and rateLimitsByLimitId", () => {

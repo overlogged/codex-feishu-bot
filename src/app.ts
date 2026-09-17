@@ -36,11 +36,13 @@ import { FileBackedChatWorkspaceResolver } from "./services/chat-workspace-resol
 import { ConversationDeliveryService } from "./services/conversation-delivery-service.js";
 import { MessageProjector } from "./services/message-projector.js";
 import { UsageStatsService } from "./services/usage-stats-service.js";
+import { TokenDailyReportService } from "./services/token-daily-report-service.js";
 import { ConversationStore } from "./stores/conversation-store.js";
 import { RunStore } from "./stores/run-store.js";
 import { RuntimeStatePersister } from "./stores/runtime-state-persister.js";
 import { ScheduledTaskStore } from "./stores/scheduled-task-store.js";
 import { SessionStore } from "./stores/session-store.js";
+import { UsageSnapshotStore } from "./stores/usage-snapshot-store.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -135,19 +137,31 @@ export function buildAppRuntime(env: Env): AppRuntime {
     "pi",
     PI_DS_FLASH_MODEL
   );
+  const usageSnapshotStore = new UsageSnapshotStore(env.USAGE_SNAPSHOT_FILE, app.log);
   const usageStatsService = new UsageStatsService(
     codexWorker,
     {
       ccusageCommand: env.CCUSAGE_COMMAND,
       cacheMs: env.USAGE_CCUSAGE_CACHE_MS,
-      usdToCnyRate: env.USAGE_USD_TO_CNY_RATE
+      usdToCnyRate: env.USAGE_USD_TO_CNY_RATE,
+      snapshotIntervalMs: env.USAGE_SNAPSHOT_INTERVAL_MS
     },
     app.log,
     undefined,
     new KimiQuotaClient({
       credentialsFile: env.KIMI_CODE_CREDENTIALS_FILE,
       logger: app.log
-    })
+    }),
+    usageSnapshotStore
+  );
+  const tokenDailyReportService = new TokenDailyReportService(
+    sessionStore,
+    usageStatsService,
+    (chatId, content) => feishuClient.sendText({ chatId, content }).then(() => undefined),
+    app.log,
+    {
+      defaultTime: env.TOKEN_DAILY_REPORT_TIME
+    }
   );
   const orchestrator = new ChatOrchestrator(
     sessionStore,
@@ -168,7 +182,8 @@ export function buildAppRuntime(env: Env): AppRuntime {
       claude: env.CLAUDE_CLI_COMMAND,
       pi: env.PI_CLI_COMMAND
     },
-    usageStatsService
+    usageStatsService,
+    env.TOKEN_DAILY_REPORT_TIME
   );
   const agentManager = new AgentManagerService(
     env.DEFAULT_WORKSPACE,
@@ -249,6 +264,9 @@ export function buildAppRuntime(env: Env): AppRuntime {
         },
         "应用启动配置摘要"
       );
+      await usageSnapshotStore.load();
+      usageStatsService.start();
+      tokenDailyReportService.start();
       await codexWorker.start?.();
       scheduleService.start((task) => orchestrator.triggerScheduledTask(task));
 
@@ -303,6 +321,8 @@ export function buildAppRuntime(env: Env): AppRuntime {
     },
     async stopExternalServices() {
       await wsSubscriber?.close();
+      tokenDailyReportService.stop();
+      usageStatsService.stop();
       scheduleService.stop();
       await codexWorker.close?.();
       await runtimeStatePersister.flush();
