@@ -155,8 +155,67 @@ test("buildPiRpcArgs lets DS4 Flash in the message override the default model", 
   assert.equal(args[args.indexOf("--model") + 1], "deepseek-flash");
 });
 
+test("buildPiRpcArgs maps a deepseek model to the openmodel gateway model id", () => {
+  const args = buildPiRpcArgs(
+    {
+      PI_CLI_PROVIDER: "deepseek",
+      PI_CLI_MODEL: "deepseek-flash",
+      PI_CLI_THINKING: "xhigh"
+    },
+    {
+      ...buildContext(),
+      provider: "openmodel",
+      model: "deepseek-flash"
+    },
+    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
+  );
+
+  assert.equal(args[args.indexOf("--provider") + 1], "openmodel");
+  assert.equal(args[args.indexOf("--model") + 1], "deepseek-v4.1-flash");
+});
+
+test("buildPiRpcArgs maps the default deepseek model to openmodel when the binding asks for it", () => {
+  const args = buildPiRpcArgs(
+    {
+      PI_CLI_PROVIDER: "deepseek",
+      PI_CLI_MODEL: "deepseek-flash",
+      PI_CLI_THINKING: "xhigh"
+    },
+    {
+      ...buildContext(),
+      provider: "openmodel"
+    },
+    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
+  );
+
+  assert.equal(args[args.indexOf("--provider") + 1], "openmodel");
+  assert.equal(args[args.indexOf("--model") + 1], "deepseek-v4.1-flash");
+});
+
+test("buildPiRpcArgs keeps the deepseek provider model id on the deepseek provider", () => {
+  const args = buildPiRpcArgs(
+    {
+      PI_CLI_PROVIDER: "deepseek",
+      PI_CLI_MODEL: "deepseek-flash",
+      PI_CLI_THINKING: "xhigh"
+    },
+    buildContext("用 ds4.1 flash"),
+    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
+  );
+
+  assert.equal(args[args.indexOf("--provider") + 1], "deepseek");
+  assert.equal(args[args.indexOf("--model") + 1], "deepseek-flash");
+});
+
 interface FakePiRpcSpawnOptions {
   holdPromptUntilAbort?: boolean;
+  errorMessage?: string;
+  /** First prompt returns only thinking; later prompts return text. */
+  thinkingOnlyFirstPrompt?: boolean;
+  /** Every prompt returns only thinking, never text. */
+  thinkingOnly?: boolean;
+  /** First prompt fails with a transient connection error; later prompts return text. */
+  transientErrorFirstPrompt?: boolean;
 }
 
 function createFakePiRpcSpawn(options: FakePiRpcSpawnOptions = {}): {
@@ -191,6 +250,7 @@ function createFakePiRpcSpawn(options: FakePiRpcSpawnOptions = {}): {
       };
 
       let buffer = "";
+      let promptCount = 0;
       stdin.setEncoding("utf8");
       stdin.on("data", (chunk: string) => {
         buffer += chunk;
@@ -220,16 +280,56 @@ function createFakePiRpcSpawn(options: FakePiRpcSpawnOptions = {}): {
 
           if (message.type === "prompt") {
             write({ id, type: "response", command: "prompt", success: true });
+            if (options.errorMessage) {
+              setImmediate(() => {
+                write({
+                  type: "message_end",
+                  message: {
+                    role: "assistant",
+                    content: [],
+                    provider: "openmodel",
+                    model: "deepseek-flash",
+                    stopReason: "error",
+                    errorMessage: options.errorMessage
+                  }
+                });
+                write({ type: "agent_settled" });
+              });
+              continue;
+            }
+            promptCount += 1;
+            if (options.transientErrorFirstPrompt && promptCount === 1) {
+              setImmediate(() => {
+                write({
+                  type: "message_end",
+                  message: {
+                    role: "assistant",
+                    content: [],
+                    provider: "openmodel",
+                    model: "deepseek-v4.1-flash",
+                    stopReason: "error",
+                    errorMessage: "Connection error."
+                  }
+                });
+                write({ type: "agent_settled" });
+              });
+              continue;
+            }
             if (!options.holdPromptUntilAbort) {
+              const returnThinkingOnly =
+                options.thinkingOnly === true ||
+                (options.thinkingOnlyFirstPrompt === true && promptCount === 1);
               setImmediate(() => {
                 write({
                   type: "message_update",
                   assistantMessageEvent: { type: "thinking_delta", delta: "先检查上下文。" }
                 });
-                write({
-                  type: "message_update",
-                  assistantMessageEvent: { type: "text_delta", delta: "OK" }
-                });
+                if (!returnThinkingOnly) {
+                  write({
+                    type: "message_update",
+                    assistantMessageEvent: { type: "text_delta", delta: "OK" }
+                  });
+                }
                 write({ type: "agent_settled" });
               });
             }
@@ -320,6 +420,95 @@ test("PiRpcWorker runs a turn over RPC and streams thinking plus final answer", 
   );
   assert.ok(commands.some((command) => command.type === "prompt"));
   assert.ok(commands.some((command) => command.type === "get_state"));
+
+  await worker.close();
+});
+
+test("PiRpcWorker surfaces the underlying provider error instead of an empty reply", async () => {
+  const { runtime } = createFakePiRpcSpawn({
+    errorMessage: '404 {"error":{"message":"no channel available for model deepseek-flash"}}'
+  });
+  const worker = new PiRpcWorker(buildWorkerEnv(), undefined, runtime);
+  const threadId = await worker.ensureThread(buildContext());
+
+  const events = await collectEvents(worker, threadId);
+
+  const errorEvent = events.find((event) => event.kind === "error");
+  assert.ok(errorEvent, "an error event should be emitted");
+  assert.match(
+    errorEvent.kind === "error" ? errorEvent.message : "",
+    /no channel available for model deepseek-flash/
+  );
+  assert.ok(
+    !events.some(
+      (event) => event.kind === "error" && event.message === "Pi RPC 没有返回可见内容。"
+    )
+  );
+
+  await worker.close();
+});
+
+test("PiRpcWorker retries once when a turn returns thinking but no final answer", async () => {
+  const { runtime, commands } = createFakePiRpcSpawn({ thinkingOnlyFirstPrompt: true });
+  const worker = new PiRpcWorker(buildWorkerEnv(), undefined, runtime);
+  const threadId = await worker.ensureThread(buildContext());
+
+  const events = await collectEvents(worker, threadId);
+
+  const promptCommands = commands.filter((command) => command.type === "prompt");
+  assert.equal(promptCommands.length, 2);
+  assert.match(
+    String(promptCommands[1]?.message ?? ""),
+    /最终答复/
+  );
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "assistant_message_completed" &&
+        event.text === "OK" &&
+        event.itemId.includes(":final")
+    )
+  );
+  assert.ok(!events.some((event) => event.kind === "error"));
+
+  await worker.close();
+});
+
+test("PiRpcWorker promotes thinking to the final answer when no text is ever produced", async () => {
+  const { runtime, commands } = createFakePiRpcSpawn({ thinkingOnly: true });
+  const worker = new PiRpcWorker(buildWorkerEnv(), undefined, runtime);
+  const threadId = await worker.ensureThread(buildContext());
+
+  const events = await collectEvents(worker, threadId);
+
+  assert.equal(commands.filter((command) => command.type === "prompt").length, 2);
+  const final = events.find(
+    (event) => event.kind === "assistant_message_completed" && event.itemId.includes(":final")
+  );
+  assert.ok(final, "thinking-only turns should still produce a final answer");
+  assert.match(final.kind === "assistant_message_completed" ? final.text : "", /先检查上下文。/);
+  assert.ok(!events.some((event) => event.kind === "error"));
+
+  await worker.close();
+});
+
+test("PiRpcWorker retries automatically after a transient connection error", async () => {
+  const { runtime, commands } = createFakePiRpcSpawn({ transientErrorFirstPrompt: true });
+  const worker = new PiRpcWorker(buildWorkerEnv(), undefined, runtime);
+  const threadId = await worker.ensureThread(buildContext());
+
+  const events = await collectEvents(worker, threadId);
+
+  assert.equal(commands.filter((command) => command.type === "prompt").length, 2);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "assistant_message_completed" &&
+        event.text === "OK" &&
+        event.itemId.includes(":final")
+    )
+  );
+  assert.ok(!events.some((event) => event.kind === "error"));
 
   await worker.close();
 });

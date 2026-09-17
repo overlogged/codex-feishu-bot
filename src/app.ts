@@ -12,6 +12,7 @@ import { KimiAcpWorker } from "./integrations/codex/kimi-acp-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
 import { PiRpcWorker, PI_DS_FLASH_MODEL } from "./integrations/codex/pi-rpc-worker.js";
 import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
+import { KimiQuotaClient } from "./integrations/kimi/kimi-quota-client.js";
 import { FakeFeishuMessageClient } from "./integrations/feishu/fake-feishu-message-client.js";
 import { FakeFeishuWsSubscriber } from "./integrations/feishu/fake-feishu-ws-subscriber.js";
 import {
@@ -34,6 +35,7 @@ import { CodexGroupControlAgent } from "./services/group-control-agent.js";
 import { FileBackedChatWorkspaceResolver } from "./services/chat-workspace-resolver.js";
 import { ConversationDeliveryService } from "./services/conversation-delivery-service.js";
 import { MessageProjector } from "./services/message-projector.js";
+import { UsageStatsService } from "./services/usage-stats-service.js";
 import { ConversationStore } from "./stores/conversation-store.js";
 import { RunStore } from "./stores/run-store.js";
 import { RuntimeStatePersister } from "./stores/runtime-state-persister.js";
@@ -133,6 +135,20 @@ export function buildAppRuntime(env: Env): AppRuntime {
     "pi",
     PI_DS_FLASH_MODEL
   );
+  const usageStatsService = new UsageStatsService(
+    codexWorker,
+    {
+      ccusageCommand: env.CCUSAGE_COMMAND,
+      cacheMs: env.USAGE_CCUSAGE_CACHE_MS,
+      usdToCnyRate: env.USAGE_USD_TO_CNY_RATE
+    },
+    app.log,
+    undefined,
+    new KimiQuotaClient({
+      credentialsFile: env.KIMI_CODE_CREDENTIALS_FILE,
+      logger: app.log
+    })
+  );
   const orchestrator = new ChatOrchestrator(
     sessionStore,
     runStore,
@@ -151,7 +167,8 @@ export function buildAppRuntime(env: Env): AppRuntime {
       kimi: env.KIMI_ACP_COMMAND,
       claude: env.CLAUDE_CLI_COMMAND,
       pi: env.PI_CLI_COMMAND
-    }
+    },
+    usageStatsService
   );
   const agentManager = new AgentManagerService(
     env.DEFAULT_WORKSPACE,

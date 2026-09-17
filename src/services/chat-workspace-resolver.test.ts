@@ -315,6 +315,60 @@ test("FileBackedChatWorkspaceResolver binds Codex 5.6 Sol with an explicit think
   assert.equal(persistedBindings.oc_group_1?.thinking, "xhigh");
 });
 
+test("FileBackedChatWorkspaceResolver keeps openmodel for a deepseek model binding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(join(workspaceRoot, "Quant"), { recursive: true });
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.bindGroupWorkspace({
+    chatId: "oc_group_1",
+    cli: "pi",
+    code: "1",
+    provider: "openmodel",
+    model: "deepseek-flash"
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected pi binding to succeed");
+  }
+  assert.equal(result.provider, "openmodel");
+  assert.equal(result.model, "deepseek-flash");
+
+  const persistedBindings = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
+    string,
+    { provider?: string; model?: string }
+  >;
+  assert.equal(persistedBindings.oc_group_1?.provider, "openmodel");
+  assert.equal(persistedBindings.oc_group_1?.model, "deepseek-flash");
+});
+
+test("FileBackedChatWorkspaceResolver keeps openmodel for GLM pi bindings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(join(workspaceRoot, "Quant"), { recursive: true });
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.bindGroupWorkspace({
+    chatId: "oc_group_1",
+    cli: "pi",
+    code: "1",
+    model: "glm-5.3-flash"
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected pi GLM binding to succeed");
+  }
+  assert.equal(result.provider, "openmodel");
+  assert.equal(result.model, "glm-5.3-flash");
+});
+
 test("FileBackedChatWorkspaceResolver rejects unsupported Codex model and thinking values", async () => {
   const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
   const workspaceRoot = join(root, "workspace");

@@ -19,6 +19,7 @@ import type { ChatWorkspaceResolver } from "./chat-workspace-resolver.js";
 import { ChatOrchestrator } from "./chat-orchestrator.js";
 import type { GroupControlAgent, GroupControlIntent } from "./group-control-agent.js";
 import { MessageProjector } from "./message-projector.js";
+import { UsageStatsService } from "./usage-stats-service.js";
 
 function createMessage(overrides: Partial<IncomingChatMessage> = {}): IncomingChatMessage {
   return {
@@ -2736,4 +2737,196 @@ test("ChatOrchestrator hands off context from the previous cli session file on s
   );
   assert.equal(sessionStore.get("oc_group_1")?.cli, "pi");
   assert.equal(sessionStore.get("oc_group_1")?.threadId, "thread_pi_1");
+});
+
+function createUsageStatsService(codexWorker: CodexWorker): UsageStatsService {
+  return new UsageStatsService(
+    codexWorker,
+    {
+      ccusageCommand: "ccusage",
+      cacheMs: 300_000,
+      usdToCnyRate: 7.2
+    },
+    createLogger(),
+    async (_command, args) => {
+      const month = (() => {
+        const now = new Date();
+        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      })();
+      if (args[0] === "pi") {
+        throw new Error("pi 数据目录不存在");
+      }
+      return JSON.stringify({
+        monthly: [
+          {
+            month,
+            totalTokens: 12_345_678,
+            totalCost: 12.34,
+            modelBreakdowns: [
+              {
+                modelName: "gpt-5.4",
+                inputTokens: 100_000,
+                outputTokens: 50_000,
+                cacheReadTokens: 1_000_000,
+                cost: 2.5
+              }
+            ]
+          }
+        ]
+      });
+    }
+  );
+}
+
+function createQuotaCodexWorker(onRunTurn?: () => void): CodexWorker {
+  return {
+    async ensureThread() {
+      return "thread_should_not_start";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      onRunTurn?.();
+    },
+    async readRateLimits() {
+      return {
+        rateLimits: {
+          limitId: "codex",
+          limitName: "GPT-6",
+          primary: {
+            usedPercent: 42,
+            windowDurationMins: 300,
+            resetsAt: 1_800_000_000
+          },
+          secondary: null,
+          credits: null,
+          planType: "pro",
+          spendControlReached: false
+        },
+        rateLimitsByLimitId: null,
+        accountId: "acc_1"
+      };
+    },
+    async readAccountUsage() {
+      return {
+        summary: {
+          lifetimeTokens: 250_000_000,
+          peakDailyTokens: null,
+          longestRunningTurnSec: null,
+          currentStreakDays: 3,
+          longestStreakDays: 10
+        },
+        dailyUsageBuckets: [{ startDate: "2026-09-15", tokens: 800_000 }]
+      };
+    }
+  };
+}
+
+test("ChatOrchestrator replies to the 额度 command in private chats without starting a run", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  let runTurnCalls = 0;
+  const sentTexts: string[] = [];
+  const codexWorker = createQuotaCodexWorker(() => {
+    runTurnCalls += 1;
+  });
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_quota_p2p";
+      }
+    }),
+    createNoopDeliveryService(),
+    projector,
+    codexWorker,
+    createWorkspaceResolver({}),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent(),
+    {},
+    createUsageStatsService(codexWorker)
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_quota",
+      chatType: "p2p",
+      messageId: "om_quota_p2p_1",
+      text: "额度"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(runStore.list().length, 0);
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /额度与用量统计/);
+  assert.match(sentTexts[0] ?? "", /GPT-6 5 小时窗口：已用 42%/);
+  assert.match(sentTexts[0] ?? "", /终身累计：2\.50 亿 token/);
+});
+
+test("ChatOrchestrator replies to @bot token in groups without invoking the control agent", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  let runTurnCalls = 0;
+  let interpretCalls = 0;
+  const sentTexts: string[] = [];
+  const codexWorker = createQuotaCodexWorker(() => {
+    runTurnCalls += 1;
+  });
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_quota_group";
+      }
+    }),
+    createNoopDeliveryService(),
+    projector,
+    codexWorker,
+    createWorkspaceResolver({}),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret() {
+        interpretCalls += 1;
+        return createControlResult({ kind: "help", detail: "不应走到控制 agent" });
+      }
+    }),
+    {},
+    createUsageStatsService(codexWorker)
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_group_quota",
+      chatType: "group",
+      messageId: "om_quota_group_1",
+      mentionsBot: true,
+      text: "@_user_1 Token"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(interpretCalls, 0);
+  assert.equal(runStore.list().length, 0);
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /额度与用量统计/);
+  assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
 });

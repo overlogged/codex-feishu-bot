@@ -1,4 +1,5 @@
-import { isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
@@ -79,6 +80,12 @@ const envSchema = z.object({
   PI_CLI_MODEL: optionalNonEmptyString.default("deepseek-flash"),
   PI_CLI_THINKING: optionalNonEmptyString.default("xhigh"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
+  CCUSAGE_COMMAND: z.string().default("ccusage"),
+  USAGE_CCUSAGE_CACHE_MS: z.coerce.number().int().positive().default(300000),
+  USAGE_USD_TO_CNY_RATE: z.coerce.number().positive().default(7.2),
+  KIMI_CODE_CREDENTIALS_FILE: z
+    .string()
+    .default(join(homedir(), ".kimi-code", "credentials", "kimi-code.json")),
   FEISHU_PROVIDER: z.enum(["sdk", "fake"]).default("sdk"),
   FEISHU_TRANSPORT: z.enum(["websocket", "webhook", "disabled"]).default("websocket"),
   FEISHU_DOMAIN: z.string().default("feishu"),
@@ -108,6 +115,7 @@ export function readEnv(): Env {
     CHAT_WORKSPACE_BINDINGS_FILE: resolveDir(defaultWorkspace, parsed.CHAT_WORKSPACE_BINDINGS_FILE),
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
     RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE),
-    FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT)
+    FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT),
+    KIMI_CODE_CREDENTIALS_FILE: resolveDir(process.cwd(), parsed.KIMI_CODE_CREDENTIALS_FILE)
   };
 }

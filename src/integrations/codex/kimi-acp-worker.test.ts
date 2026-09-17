@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import type { ChildProcessByStdio } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { appendFileSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -256,6 +260,8 @@ function createFakeAcpSpawn(
     failResume?: boolean;
     hangPromptUntilCancel?: boolean;
     hangPromptCount?: number;
+    swallowPrompts?: boolean;
+    onSwallowedPrompt?: (text: string) => void;
   } = {}
 ): {
   runtime: KimiAcpRuntime;
@@ -345,7 +351,18 @@ function createFakeAcpSpawn(
 
         if (message.method === "session/prompt" && message.id !== undefined) {
           const id = message.id;
-          prompts.push({ id, text: message.params?.prompt?.[0]?.text ?? "" });
+          const text = message.params?.prompt?.[0]?.text ?? "";
+          prompts.push({ id, text });
+          if (options.swallowPrompts) {
+            // 模拟 kimi-code 0.43+ 在引擎被内部 turn 占用时的行为：
+            // prompt 被排队，立刻以 end_turn 应答且不回流任何事件。
+            setImmediate(() => {
+              write({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
+              options.onSwallowedPrompt?.(text);
+            });
+            continue;
+          }
+
           if (promptsToHang > 0) {
             promptsToHang -= 1;
             hangingResolvers.set(id, () => {
@@ -555,4 +572,133 @@ test("KimiAcpWorker waits for the active turn before sending the next prompt", a
   );
 
   await worker.close();
+});
+
+async function withFakeKimiHome(
+  run: (paths: { home: string; wirePath: string }) => Promise<void>
+): Promise<void> {
+  const home = await mkdtemp(join(tmpdir(), "kimi-acp-home-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const kimiDir = join(home, ".kimi-code");
+    const wireDir = join(
+      kimiDir,
+      "sessions",
+      "wd_test",
+      "session_fake_1",
+      "agents",
+      "main"
+    );
+    await mkdir(wireDir, { recursive: true });
+    await writeFile(
+      join(kimiDir, "workspaces.json"),
+      JSON.stringify({ workspaces: { wd_test: { root: "/tmp" } } })
+    );
+    const wirePath = join(wireDir, "wire.jsonl");
+    await writeFile(wirePath, "");
+    await run({ home, wirePath });
+  } finally {
+    process.env.HOME = previousHome;
+  }
+}
+
+test("KimiAcpWorker recovers a queued prompt's answer from the session transcript", async () => {
+  await withFakeKimiHome(async ({ wirePath }) => {
+    const { runtime } = createFakeAcpSpawn({
+      swallowPrompts: true,
+      onSwallowedPrompt: (text) => {
+        setTimeout(() => {
+          const now = Date.now();
+          appendFileSync(
+            wirePath,
+            [
+              JSON.stringify({
+                type: "turn.prompt",
+                agentId: "main",
+                input: [{ type: "text", text }],
+                promptId: "msg_queued_1",
+                turnId: 42,
+                time: now
+              }),
+              JSON.stringify({
+                type: "context.append_loop_event",
+                agentId: "main",
+                event: {
+                  type: "content.part",
+                  turnId: "42",
+                  step: 1,
+                  part: { type: "think", think: "内部思考不应出现" }
+                },
+                time: now
+              }),
+              JSON.stringify({
+                type: "context.append_loop_event",
+                agentId: "main",
+                event: {
+                  type: "content.part",
+                  turnId: "42",
+                  step: 1,
+                  part: { type: "text", text: "排队消息的答复。" }
+                },
+                time: now
+              }),
+              JSON.stringify({
+                type: "turn.ended",
+                agentId: "main",
+                turnId: 42,
+                reason: "completed",
+                time: now
+              })
+            ].join("\n") + "\n"
+          );
+        }, 50);
+      }
+    });
+    const worker = new KimiAcpWorker({ KIMI_ACP_COMMAND: "kimi" }, undefined, runtime, {
+      pollIntervalMs: 10,
+      timeoutMs: 3_000
+    });
+
+    const events = await collectEvents(worker, "pending:kimi-acp:queued");
+
+    assert.ok(
+      !events.some((event) => event.kind === "error"),
+      `queued prompt should recover without error: ${JSON.stringify(events)}`
+    );
+    assert.ok(
+      events.some(
+        (event) => event.kind === "assistant_message_completed" && event.itemId.endsWith(":notice")
+      ),
+      `queued notice should be announced: ${JSON.stringify(events)}`
+    );
+    const final = events.at(-1);
+    assert.equal(final?.kind, "assistant_message_completed");
+    assert.ok(final?.kind === "assistant_message_completed" && final.itemId.endsWith(":final"));
+    assert.equal(final?.kind === "assistant_message_completed" && final.text, "排队消息的答复。");
+    assert.ok(!JSON.stringify(events).includes("内部思考不应出现"));
+
+    await worker.close();
+  });
+});
+
+test("KimiAcpWorker times out when a queued prompt never produces a transcript answer", async () => {
+  await withFakeKimiHome(async () => {
+    const { runtime } = createFakeAcpSpawn({ swallowPrompts: true });
+    const worker = new KimiAcpWorker({ KIMI_ACP_COMMAND: "kimi" }, undefined, runtime, {
+      pollIntervalMs: 10,
+      timeoutMs: 150
+    });
+
+    const events = await collectEvents(worker, "pending:kimi-acp:queued-timeout");
+
+    const error = events.find((event) => event.kind === "error");
+    assert.ok(error, `expected a timeout error event: ${JSON.stringify(events)}`);
+    assert.ok(
+      error?.kind === "error" && error.message.includes("超时"),
+      `unexpected error message: ${JSON.stringify(error)}`
+    );
+
+    await worker.close();
+  });
 });

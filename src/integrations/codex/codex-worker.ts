@@ -37,6 +37,46 @@ export interface CodexGoalRunContext extends CodexTurnContext {
   objective: string;
 }
 
+export interface CodexRateLimitWindow {
+  usedPercent: number | null;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface CodexRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  primary: CodexRateLimitWindow | null;
+  secondary: CodexRateLimitWindow | null;
+  credits: {
+    hasCredits: boolean;
+    unlimited: boolean;
+    balance: string | null;
+  } | null;
+  planType: string | null;
+  spendControlReached: boolean | null;
+}
+
+export interface CodexRateLimits {
+  rateLimits: CodexRateLimitSnapshot | null;
+  rateLimitsByLimitId: Record<string, CodexRateLimitSnapshot | null> | null;
+  accountId: string | null;
+}
+
+export interface CodexAccountUsage {
+  summary: {
+    lifetimeTokens: number | null;
+    peakDailyTokens: number | null;
+    longestRunningTurnSec: number | null;
+    currentStreakDays: number | null;
+    longestStreakDays: number | null;
+  } | null;
+  dailyUsageBuckets: Array<{
+    startDate: string | null;
+    tokens: number | null;
+  }> | null;
+}
+
 export interface CodexWorker {
   start?(): Promise<void>;
   close?(): Promise<void>;
@@ -48,4 +88,6 @@ export interface CodexWorker {
   clearGoal?(context: CodexTurnContext & { threadId: string }): Promise<boolean>;
   runGoal?(context: CodexGoalRunContext): AsyncGenerator<CodexEvent>;
   runTurn(context: CodexTurnContext & { threadId: string }): AsyncGenerator<CodexEvent>;
+  readRateLimits?(): Promise<CodexRateLimits | null>;
+  readAccountUsage?(): Promise<CodexAccountUsage | null>;
 }

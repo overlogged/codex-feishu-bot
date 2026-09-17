@@ -31,6 +31,9 @@ export type GroupControlIntent =
       kind: "show_binding";
     }
   | {
+      kind: "show_quota";
+    }
+  | {
       kind: "bind_workspace";
       cli: ChatCli;
       code: string;
@@ -195,6 +198,7 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
   switch (kind) {
     case "list_workspaces":
     case "show_binding":
+    case "show_quota":
     case "list_schedules":
     case "new_session":
     case "clear_goal":
@@ -349,6 +353,7 @@ function buildInterpreterPrompt(
     "可返回的 kind：",
     '- {"kind":"list_workspaces"}',
     '- {"kind":"show_binding"}',
+    '- {"kind":"show_quota"}',
     '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|deepseek|ds","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
@@ -384,6 +389,7 @@ function buildInterpreterPrompt(
     "- provider 字段只在用户明确指定时才填，否则省略（让运行时按环境变量或默认规则处理）。",
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",
+    "- 如果用户问额度/token/用量/花费/剩余，返回 show_quota。",
     "- 如果用户说“新会话”“重开会话”，返回 new_session。",
     "- 如果用户说“设置 goal/目标/长期目标/当前目标 为 ...”，返回 set_goal，并把目标正文放进 goal。",
     "- 如果用户说“清除 goal/目标/长期目标/当前目标”，返回 clear_goal。",

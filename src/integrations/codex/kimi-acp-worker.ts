@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
@@ -7,6 +8,7 @@ import type { Env } from "../../config/env.js";
 import type { CodexEvent } from "../../domain/types.js";
 import { AsyncEventQueue } from "./async-event-queue.js";
 import { buildCliTurnInput } from "./cli-turn-input.js";
+import { resolveKimiAcpWirePath } from "./thread-transcript.js";
 import type {
   CodexInterruptContext,
   CodexTurnContext,
@@ -192,6 +194,32 @@ export class KimiAcpTurnProjector {
   constructor(private readonly turnId: string) {
     this.commentaryItemId = `assistant:${turnId}:commentary`;
     this.finalItemId = `assistant:${turnId}:final`;
+  }
+
+  hasVisibleActivity(): boolean {
+    return this.commentaryStarted || this.finalStarted || this.toolSequence > 0;
+  }
+
+  announceQueued(): CodexEvent[] {
+    const itemId = `assistant:${this.turnId}:notice`;
+    const text =
+      "Kimi 还在执行上一条指令，这条消息已在 Kimi 侧排队；轮到它时结果会同步到这里。";
+    return [
+      { kind: "assistant_message_started", itemId, source: "commentary" },
+      { kind: "assistant_message_delta", itemId, text },
+      { kind: "assistant_message_completed", itemId, text }
+    ];
+  }
+
+  ingestRecoveredFinal(text: string): CodexEvent[] {
+    const events = this.ensureFinalStarted();
+    this.finalText += text;
+    events.push({
+      kind: "assistant_message_delta",
+      itemId: this.finalItemId,
+      text
+    });
+    return events;
   }
 
   ingestUpdate(update: Record<string, unknown>): CodexEvent[] {
@@ -725,17 +753,30 @@ interface ActiveAcpTurn {
   interrupted: boolean;
 }
 
+export interface KimiAcpQueuedRecoveryOptions {
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+}
+
+type QueuedRecoveryResult = { text: string } | { errorMessage: string } | undefined;
+
 export class KimiAcpWorker implements CodexWorker {
   private readonly sessionsByChatId = new Map<string, KimiAcpSession>();
   private readonly activeTurns = new Map<string, ActiveAcpTurn>();
+  private readonly claimedTurnsBySession = new Map<string, Set<string>>();
   private readonly runtime: KimiAcpRuntime;
+  private readonly recoveryPollIntervalMs: number;
+  private readonly recoveryTimeoutMs: number;
 
   constructor(
     env: Pick<Env, "KIMI_ACP_COMMAND">,
     private readonly logger?: LoggerLike,
-    runtime?: KimiAcpRuntime
+    runtime?: KimiAcpRuntime,
+    recovery?: KimiAcpQueuedRecoveryOptions
   ) {
     this.runtime = runtime ?? new HostKimiAcpRuntime(env);
+    this.recoveryPollIntervalMs = recovery?.pollIntervalMs ?? 5_000;
+    this.recoveryTimeoutMs = recovery?.timeoutMs ?? 45 * 60_000;
   }
 
   supportsSteer(): boolean {
@@ -808,16 +849,63 @@ export class KimiAcpWorker implements CodexWorker {
       }
     });
 
-    void session
-      .prompt(buildCliTurnInput(context))
-      .then((result) => {
-        for (const event of projector.finalize({
-          cancelled: activeTurn.interrupted || result.stopReason === "cancelled"
-        })) {
+    const promptText = buildCliTurnInput(context);
+    const sentAtMs = Date.now();
+    void (async () => {
+      try {
+        const result = await session.prompt(promptText);
+        const cancelled = activeTurn.interrupted || result.stopReason === "cancelled";
+        if (!cancelled && !projector.hasVisibleActivity()) {
+          // kimi-code 0.43+ 的 ACP 适配层在引擎被内部 turn（如后台任务完成通知）占用时，
+          // 会把 prompt 排队并立刻以 end_turn 应答，事件也不再回流。此时从会话的
+          // wire.jsonl 里等这个排队 turn 真正执行完，把它的可见答复补投到本次 run。
+          this.logger?.warn(
+            {
+              chatId: context.message.chatId,
+              messageId: context.message.messageId,
+              workspaceId: context.workspaceId,
+              threadId: sessionId,
+              stopReason: result.stopReason ?? null
+            },
+            "Kimi ACP prompt 立即返回且没有任何事件，按引擎排队处理并等待补投"
+          );
+          for (const event of projector.announceQueued()) {
+            eventQueue.push(event);
+          }
+
+          const recovered = await this.recoverQueuedTurn({
+            session,
+            sessionId,
+            workspaceId: context.workspaceId,
+            promptText,
+            sentAtMs,
+            interrupted: () => activeTurn.interrupted
+          });
+          if (recovered && "text" in recovered) {
+            for (const event of projector.ingestRecoveredFinal(recovered.text)) {
+              eventQueue.push(event);
+            }
+            for (const event of projector.finalize({})) {
+              eventQueue.push(event);
+            }
+            return;
+          }
+          if (recovered && "errorMessage" in recovered) {
+            for (const event of projector.finalize({ errorMessage: recovered.errorMessage })) {
+              eventQueue.push(event);
+            }
+            return;
+          }
+          for (const event of projector.finalize({ cancelled: true })) {
+            eventQueue.push(event);
+          }
+          return;
+        }
+
+        for (const event of projector.finalize({ cancelled })) {
           eventQueue.push(event);
         }
-      })
-      .catch((error) => {
+      } catch (error) {
         for (const event of projector.finalize({
           cancelled: activeTurn.interrupted,
           errorMessage: activeTurn.interrupted
@@ -828,12 +916,12 @@ export class KimiAcpWorker implements CodexWorker {
         })) {
           eventQueue.push(event);
         }
-      })
-      .finally(() => {
+      } finally {
         session.setUpdateHandler(undefined);
         eventQueue.close();
         this.activeTurns.delete(turnId);
-      });
+      }
+    })();
 
     for (;;) {
       const next = await eventQueue.next();
@@ -849,6 +937,126 @@ export class KimiAcpWorker implements CodexWorker {
     const sessions = Array.from(this.sessionsByChatId.values());
     this.sessionsByChatId.clear();
     await Promise.allSettled(sessions.map((session) => session.stop()));
+  }
+
+  private async recoverQueuedTurn(input: {
+    session: KimiAcpSession;
+    sessionId: string;
+    workspaceId: string;
+    promptText: string;
+    sentAtMs: number;
+    interrupted: () => boolean;
+  }): Promise<QueuedRecoveryResult> {
+    const wirePath = await resolveKimiAcpWirePath(input.sessionId, input.workspaceId);
+    let claimed = this.claimedTurnsBySession.get(input.sessionId);
+    if (!claimed) {
+      claimed = new Set<string>();
+      this.claimedTurnsBySession.set(input.sessionId, claimed);
+    }
+
+    let processedChars = 0;
+    let lastSize = -1;
+    let turnId: string | undefined;
+    const textParts: string[] = [];
+    const deadline = Date.now() + this.recoveryTimeoutMs;
+
+    while (Date.now() < deadline) {
+      if (input.interrupted()) {
+        return undefined;
+      }
+      if (!input.session.isAlive()) {
+        return { errorMessage: "Kimi ACP 进程已退出，排队消息的答复未能补投。" };
+      }
+
+      let raw: string | undefined;
+      try {
+        const info = await stat(wirePath);
+        if (info.size !== lastSize) {
+          lastSize = info.size;
+          raw = await readFile(wirePath, "utf8");
+        }
+      } catch {
+        // wire 文件还没建出来，继续等。
+      }
+
+      if (raw !== undefined) {
+        if (raw.length < processedChars) {
+          // 文件被重建过，从头再扫一遍。
+          processedChars = 0;
+        }
+        const fresh = raw.slice(processedChars);
+        processedChars = raw.length;
+        for (const line of fresh.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+
+          let entry: Record<string, unknown>;
+          try {
+            entry = JSON.parse(trimmed) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+
+          if (turnId === undefined) {
+            if (
+              entry.type !== "turn.prompt" ||
+              typeof entry.time !== "number" ||
+              entry.time < input.sentAtMs - 5_000
+            ) {
+              continue;
+            }
+
+            const candidateId = entry.turnId !== undefined ? String(entry.turnId) : undefined;
+            const candidateText = Array.isArray(entry.input)
+              ? entry.input
+                  .map((part) =>
+                    isRecord(part) && part.type === "text" && typeof part.text === "string"
+                      ? part.text
+                      : ""
+                  )
+                  .join("")
+              : "";
+            if (candidateId && candidateText === input.promptText && !claimed.has(candidateId)) {
+              claimed.add(candidateId);
+              turnId = candidateId;
+            }
+            continue;
+          }
+
+          if (entry.type === "context.append_loop_event" && isRecord(entry.event)) {
+            const event = entry.event;
+            if (
+              event.type === "content.part" &&
+              String(event.turnId) === turnId &&
+              isRecord(event.part) &&
+              event.part.type === "text" &&
+              typeof event.part.text === "string" &&
+              event.part.text.trim()
+            ) {
+              textParts.push(event.part.text.trim());
+            }
+            continue;
+          }
+
+          if (entry.type === "turn.ended" && String(entry.turnId) === turnId) {
+            const text = textParts.join("\n").trim();
+            return text
+              ? { text }
+              : { errorMessage: "Kimi ACP 排队消息已执行，但没有产生可见答复。" };
+          }
+        }
+      }
+
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, this.recoveryPollIntervalMs).unref();
+      });
+    }
+
+    return {
+      errorMessage: `Kimi ACP 排队消息等待结果超时（${Math.round(this.recoveryTimeoutMs / 60_000)} 分钟），请重新发送。`
+    };
   }
 
   private async getOrCreateSession(

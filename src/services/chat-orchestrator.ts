@@ -36,6 +36,7 @@ import {
   renderSessionResumeLine,
   type SessionResumeCliCommands
 } from "./session-resume-command.js";
+import { UsageStatsService } from "./usage-stats-service.js";
 
 interface LoggerLike {
   info(message: unknown, ...args: unknown[]): void;
@@ -49,6 +50,7 @@ const STEER_ACKNOWLEDGEMENT_THRESHOLD_MS = 15_000;
 const SCHEDULE_COMMAND = /^(定时任务|schedule|schedules)(?:\s+(.+))?$/i;
 const NEW_SESSION_COMMAND = /^(新会话|new\s+session|reset\s+session)$/i;
 const TOOL_CARDS_COMMAND = /^(工具卡片|tool\s*cards?)(?:\s+(开|开启|on|关|关闭|off|状态|status))?$/i;
+const QUOTA_COMMAND = /^(额度|余量|用量|token|tokens|usage|quota|stats)$/i;
 
 type ToolCardsCommandAction = "on" | "off" | "status";
 
@@ -614,7 +616,8 @@ export class ChatOrchestrator {
         };
       }
     },
-    private readonly resumeCliCommands: SessionResumeCliCommands = {}
+    private readonly resumeCliCommands: SessionResumeCliCommands = {},
+    private readonly usageStatsService?: UsageStatsService
   ) {}
 
   enqueue(message: IncomingChatMessage): void {
@@ -1345,6 +1348,15 @@ export class ChatOrchestrator {
       return true;
     }
 
+    if (
+      this.usageStatsService &&
+      QUOTA_COMMAND.test(stripMentions(message.text)) &&
+      (message.chatType !== "group" || message.mentionsBot)
+    ) {
+      await this.handleQuotaCommand(message);
+      return true;
+    }
+
     if (message.chatType === "group" && message.mentionsBot) {
       await this.handleGroupMentionControlMessage(message);
       return true;
@@ -1408,6 +1420,33 @@ export class ChatOrchestrator {
       }
     );
     return true;
+  }
+
+  private async handleQuotaCommand(message: IncomingChatMessage): Promise<void> {
+    if (!this.usageStatsService) {
+      return;
+    }
+
+    let report: string;
+    try {
+      report = await this.usageStatsService.buildReport();
+    } catch (error) {
+      this.logger.error(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "生成额度用量统计失败"
+      );
+      report = "额度用量统计暂时生成失败，请稍后再试。";
+    }
+
+    await this.sendTextNotice(message.chatId, report, {
+      messageId: message.messageId,
+      context: "发送额度用量统计失败",
+      ...buildControlReplyMetadata(message)
+    });
   }
 
   private async handleToolCardsCommand(
@@ -1646,6 +1685,30 @@ export class ChatOrchestrator {
           {
             messageId: message.messageId,
             context: "发送当前绑定状态失败",
+            ...replyMetadata
+          }
+        );
+        return;
+      }
+      case "show_quota": {
+        if (!this.usageStatsService) {
+          await this.sendTextNotice(
+            message.chatId,
+            "当前环境未配置额度用量统计服务。",
+            {
+              messageId: message.messageId,
+              context: "发送额度用量统计失败",
+              ...replyMetadata
+            }
+          );
+          return;
+        }
+        await this.sendTextNotice(
+          message.chatId,
+          await this.usageStatsService.buildReport(),
+          {
+            messageId: message.messageId,
+            context: "发送额度用量统计失败",
             ...replyMetadata
           }
         );

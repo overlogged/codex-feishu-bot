@@ -222,6 +222,27 @@ function resolveCodexBindingSettings(input: { model?: string; thinking?: string 
   };
 }
 
+/**
+ * GLM 只存在于 openmodel provider，绑定 glm 时必须落到 openmodel；
+ * openmodel 同时也承载 deepseek-v4.1-flash，所以显式 provider 要保留，
+ * 由运行时把模型 id 翻译成对应 provider 的 id。
+ */
+function normalizePiBindingProvider(input: {
+  cli: ChatCli;
+  provider?: string;
+  model?: string;
+}): string | undefined {
+  if (input.cli !== "pi") {
+    return input.provider;
+  }
+
+  if (input.model?.startsWith("glm")) {
+    return "openmodel";
+  }
+
+  return input.provider;
+}
+
 function parseBindingWorkspace(
   value:
     | string
@@ -488,7 +509,11 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ok: true,
       workspaceId: resolvedWorkspace,
       cli: configuredBinding.cli,
-      provider: configuredBinding.provider,
+      provider: normalizePiBindingProvider({
+        cli: configuredBinding.cli,
+        provider: configuredBinding.provider,
+        model: codexSettings?.model ?? configuredBinding.model
+      }),
       model: codexSettings?.model ?? configuredBinding.model,
       thinking: codexSettings?.thinking ?? configuredBinding.thinking
     };
@@ -566,6 +591,11 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
 
     const resolvedModel = codexSettings?.model ?? input.model;
     const resolvedThinking = codexSettings?.thinking ?? input.thinking;
+    const resolvedProvider = normalizePiBindingProvider({
+      cli: input.cli,
+      provider: input.provider,
+      model: resolvedModel
+    });
 
     const entries = await this.listCatalog();
     if (entries.length === 0) {
@@ -611,7 +641,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       [input.chatId]: {
         workspace: entry.workspace,
         cli: input.cli,
-        ...(input.provider ? { provider: input.provider } : {}),
+        ...(resolvedProvider ? { provider: resolvedProvider } : {}),
         ...(resolvedModel ? { model: resolvedModel } : {}),
         ...(resolvedThinking ? { thinking: resolvedThinking } : {})
       }
@@ -630,7 +660,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ok: true,
       entry,
       cli: input.cli,
-      provider: input.provider,
+      provider: resolvedProvider,
       model: resolvedModel,
       thinking: resolvedThinking,
       configFilePath: this.configFilePath

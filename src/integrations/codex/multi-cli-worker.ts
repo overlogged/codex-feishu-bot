@@ -1,6 +1,8 @@
 import type { ChatCli } from "../../domain/types.js";
 import type {
+  CodexAccountUsage,
   CodexGoalRunContext,
+  CodexRateLimits,
   CodexTurnContext,
   CodexWorker
 } from "./codex-worker.js";
@@ -71,5 +73,13 @@ export class MultiCliWorker implements CodexWorker {
 
   async *runTurn(context: CodexTurnContext & { threadId: string }) {
     yield* this.workers[context.cli].runTurn(context);
+  }
+
+  readRateLimits(): Promise<CodexRateLimits | null> {
+    return this.workers.codex.readRateLimits?.() ?? Promise.resolve(null);
+  }
+
+  readAccountUsage(): Promise<CodexAccountUsage | null> {
+    return this.workers.codex.readAccountUsage?.() ?? Promise.resolve(null);
   }
 }

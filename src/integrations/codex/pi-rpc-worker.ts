@@ -24,6 +24,30 @@ interface PiModelSelection {
 }
 
 export const PI_DS_FLASH_MODEL = "deepseek-flash";
+/** openmodel 网关上的 DeepSeek V4.1 Flash 模型 id（和 deepseek 官方 provider 的 id 不同）。 */
+export const PI_DS_FLASH_OPENMODEL_MODEL = "deepseek-v4.1-flash";
+
+/** 有的模型只输出 thinking 不输出正文，用它补一轮索要最终答复。 */
+const PI_FINAL_ANSWER_PROMPT =
+  "请基于上面的分析，用中文直接给出最终答复，不要再只输出思考过程。";
+
+/** 上游网络抖动中断后，用它让模型继续刚才的请求。 */
+const PI_RETRY_PROMPT =
+  "刚才这一轮因为网络连接中断了，请继续完成上面的请求，并直接给出最终答复。";
+
+/** 可重试的瞬时错误：连接抖动、超时、网关 5xx/过载等。 */
+const PI_TRANSIENT_ERROR_PATTERN =
+  /connection error|tls handshake|econnreset|econnrefused|econnaborted|socket hang up|network error|stream disconnected|fetch failed|timed? ?out|\b(?:502|503|504|529)\b|overloaded/i;
+
+export function isTransientPiConnectionError(message: string | undefined): boolean {
+  return Boolean(message && PI_TRANSIENT_ERROR_PATTERN.test(message));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms).unref?.();
+  });
+}
 
 export type PiRpcChild = ChildProcessByStdio<Writable, Readable, Readable>;
 
@@ -156,23 +180,54 @@ interface PiResolvedSettings {
   thinking?: string;
 }
 
+/**
+ * 同一个模型在不同 provider 上的 id 可能不同：
+ * - deepseek 官方 provider 用 `deepseek-flash`
+ * - openmodel 网关用 `deepseek-v4.1-flash`
+ * 传错 id 会被上游以 404 拒绝，而且这类错误在 RPC 事件里没有正文，看起来就是“结果为空”。
+ */
+function resolvePiProviderModelId(
+  provider: string | undefined,
+  model: string | undefined
+): string | undefined {
+  if (!model) {
+    return model;
+  }
+
+  if (model.startsWith("deepseek")) {
+    return provider === "openmodel" ? PI_DS_FLASH_OPENMODEL_MODEL : PI_DS_FLASH_MODEL;
+  }
+
+  return model;
+}
+
+/**
+ * GLM 只存在于本机 pi 的 openmodel 自定义 provider 里，所以 glm 模型必须路由到
+ * openmodel；其余情况尊重显式 provider / 环境默认值（openmodel 也能承载 ds flash）。
+ */
+function resolvePiProvider(
+  explicitProvider: string | undefined,
+  model: string | undefined,
+  envProvider: string | undefined
+): string | undefined {
+  if (model?.startsWith("glm")) {
+    return "openmodel";
+  }
+
+  return explicitProvider ?? envProvider;
+}
+
 function resolvePiSettings(
   env: Pick<Env, "PI_CLI_PROVIDER" | "PI_CLI_MODEL" | "PI_CLI_THINKING">,
   context: CodexTurnContext
 ): PiResolvedSettings {
   const messageSelection = selectPiModelFromMessage(context.message.text);
   const explicitProvider = messageSelection.provider ?? context.provider;
-  const model = canonicalizePiModel(
+  const requestedModel = canonicalizePiModel(
     messageSelection.model ?? context.model ?? env.PI_CLI_MODEL
   );
-  // GLM 模型只存在于本机 pi 的 openmodel 自定义 provider 里；如果 provider 只是
-  // 环境默认值（deepseek/openrouter），跨 provider 传 glm 模型会被上游 400 拒绝。
-  const envProvider = env.PI_CLI_PROVIDER;
-  const provider =
-    explicitProvider ??
-    (model?.startsWith("glm") && (envProvider === "deepseek" || envProvider === "openrouter")
-      ? "openmodel"
-      : envProvider);
+  const provider = resolvePiProvider(explicitProvider, requestedModel, env.PI_CLI_PROVIDER);
+  const model = resolvePiProviderModelId(provider, requestedModel);
   const thinking = messageSelection.thinking ?? context.thinking ?? env.PI_CLI_THINKING;
 
   return { provider, model, thinking };
@@ -298,6 +353,7 @@ export class PiRpcTurnProjector {
   private toolSequence = 0;
   private readonly toolStateByCallId = new Map<string, PiToolState>();
   private rawText = "";
+  private errorMessage?: string;
 
   constructor(private readonly turnId: string) {
     this.commentaryItemId = `assistant:${turnId}:commentary`;
@@ -325,6 +381,8 @@ export class PiRpcTurnProjector {
         return this.ingestToolExecutionEnd(entry);
       case "message_end":
         return this.ingestMessageEnd(entry.message);
+      case "auto_retry_end":
+        return this.ingestAutoRetryEnd(entry);
       default:
         return [];
     }
@@ -332,6 +390,22 @@ export class PiRpcTurnProjector {
 
   ingestEvent(entry: Record<string, unknown>): CodexEvent[] {
     return this.ingestLine(JSON.stringify(entry));
+  }
+
+  hasFinalAnswer(): boolean {
+    return this.finalText.trim().length > 0;
+  }
+
+  hasError(): boolean {
+    return Boolean(this.errorMessage);
+  }
+
+  getErrorMessage(): string | undefined {
+    return this.errorMessage;
+  }
+
+  resetError(): void {
+    this.errorMessage = undefined;
   }
 
   finalize(options: { cancelled?: boolean; errorMessage?: string }): CodexEvent[] {
@@ -345,11 +419,12 @@ export class PiRpcTurnProjector {
       });
     }
 
-    if (this.finalStarted) {
+    const finalText = this.finalText.trim();
+    if (this.finalStarted && finalText) {
       events.push({
         kind: "assistant_message_completed",
         itemId: this.finalItemId,
-        text: this.finalText.trim()
+        text: finalText
       });
     }
 
@@ -365,8 +440,21 @@ export class PiRpcTurnProjector {
       return events;
     }
 
-    if (!this.finalStarted) {
-      const fallback = this.rawText.trim();
+    // 模型/上游错误会以空 content + stopReason=error 的 assistant 消息结束。
+    // 之前这里只做了“没有可见内容”的兜底，真正的 404/鉴权错误被吞掉了。
+    if (this.errorMessage && !finalText) {
+      events.push({
+        kind: "error",
+        message: this.errorMessage
+      });
+      return events;
+    }
+
+    if (!finalText) {
+      // 有些模型（尤其是 openmodel 上的 deepseek）会只输出 thinking、不输出正文，
+      // 然后以 stopReason=stop 正常结束。这里把思考内容提升为最终答复，
+      // 否则整轮会因为“没有最终答复”而失败，用户看不到任何结论。
+      const fallback = this.commentaryText.trim() || this.rawText.trim();
       if (fallback) {
         events.push(...this.ensureFinalStarted());
         events.push({
@@ -377,9 +465,7 @@ export class PiRpcTurnProjector {
       } else {
         events.push({
           kind: "error",
-          message: this.commentaryStarted
-            ? "Pi RPC 没有返回最终答复。"
-            : "Pi RPC 没有返回可见内容。"
+          message: "Pi RPC 没有返回可见内容。"
         });
       }
     }
@@ -498,8 +584,32 @@ export class PiRpcTurnProjector {
     ];
   }
 
+  private ingestAutoRetryEnd(entry: Record<string, unknown>): CodexEvent[] {
+    if (
+      entry.success === false &&
+      typeof entry.finalError === "string" &&
+      entry.finalError.trim()
+    ) {
+      this.errorMessage = entry.finalError.trim();
+    }
+    return [];
+  }
+
   private ingestMessageEnd(message: unknown): CodexEvent[] {
-    if (!isRecord(message) || message.role !== "assistant" || this.finalStarted) {
+    if (!isRecord(message) || message.role !== "assistant") {
+      return [];
+    }
+
+    // stopReason=aborted 是用户主动中断，不算错误；其余带 errorMessage 的都要暴露出来。
+    if (
+      message.stopReason !== "aborted" &&
+      typeof message.errorMessage === "string" &&
+      message.errorMessage.trim()
+    ) {
+      this.errorMessage = message.errorMessage.trim();
+    }
+
+    if (this.finalStarted) {
       return [];
     }
 
@@ -961,19 +1071,77 @@ export class PiRpcWorker implements CodexWorker {
     };
     this.activeTurns.set(turnId, activeTurn);
 
-    void session
-      .prompt(buildCliTurnInput(context), (entry) => {
-        for (const event of projector.ingestEvent(entry)) {
-          eventQueue.push(event);
+    const runPrompt = async (): Promise<void> => {
+      const maxAttempts = 3;
+      let finalAnswerNudged = false;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        let promptText: string;
+        if (attempt === 1) {
+          promptText = buildCliTurnInput(context);
+        } else if (finalAnswerNudged) {
+          promptText = PI_FINAL_ANSWER_PROMPT;
+        } else {
+          promptText = PI_RETRY_PROMPT;
         }
-      })
-      .then(() => {
-        for (const event of projector.finalize({
-          cancelled: activeTurn.interrupted
-        })) {
-          eventQueue.push(event);
+
+        await session.prompt(promptText, (entry) => {
+          for (const event of projector.ingestEvent(entry)) {
+            eventQueue.push(event);
+          }
+        });
+
+        if (activeTurn.interrupted || projector.hasFinalAnswer()) {
+          break;
         }
-      })
+
+        const errorMessage = projector.getErrorMessage();
+        if (errorMessage) {
+          if (isTransientPiConnectionError(errorMessage) && attempt < maxAttempts) {
+            this.logger?.warn(
+              {
+                cli: "pi",
+                chatId: context.message.chatId,
+                messageId: context.message.messageId,
+                sessionPath,
+                attempt,
+                error: errorMessage
+              },
+              "Pi RPC 遇到瞬时网络错误，稍后重试"
+            );
+            projector.resetError();
+            await delay(attempt * 1_000);
+            continue;
+          }
+          break;
+        }
+
+        // 没有错误也没有正文：模型只返回了思考过程。
+        if (!finalAnswerNudged && attempt < maxAttempts) {
+          finalAnswerNudged = true;
+          this.logger?.warn(
+            {
+              cli: "pi",
+              chatId: context.message.chatId,
+              messageId: context.message.messageId,
+              sessionPath,
+              attempt
+            },
+            "Pi RPC 只返回了思考过程，追加一轮以获取最终答复"
+          );
+          continue;
+        }
+        break;
+      }
+
+      for (const event of projector.finalize({
+        cancelled: activeTurn.interrupted
+      })) {
+        eventQueue.push(event);
+      }
+    };
+
+    void runPrompt()
       .catch((error) => {
         for (const event of projector.finalize({
           cancelled: activeTurn.interrupted,

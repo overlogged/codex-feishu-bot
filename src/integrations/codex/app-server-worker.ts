@@ -5,9 +5,13 @@ import type { CodexEvent } from "../../domain/types.js";
 import { AsyncEventQueue } from "./async-event-queue.js";
 import { AppServerWsConnection } from "./app-server-ws-connection.js";
 import type {
+  CodexAccountUsage,
   CodexGoalRunContext,
   CodexGoalState,
   CodexInterruptContext,
+  CodexRateLimits,
+  CodexRateLimitSnapshot,
+  CodexRateLimitWindow,
   CodexTurnContext,
   CodexWorker
 } from "./codex-worker.js";
@@ -81,6 +85,120 @@ interface ThreadReadResponse {
 interface JsonRpcNotification {
   method: string;
   params?: unknown;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+
+  return null;
+}
+
+function asNullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function asNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseRateLimitWindow(value: unknown): CodexRateLimitWindow | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  return {
+    usedPercent: asNullableNumber(record.usedPercent),
+    windowDurationMins: asNullableNumber(record.windowDurationMins),
+    resetsAt: asNullableNumber(record.resetsAt)
+  };
+}
+
+function parseRateLimitSnapshot(value: unknown): CodexRateLimitSnapshot | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const credits = asRecord(record.credits);
+
+  return {
+    limitId: asNullableString(record.limitId),
+    limitName: asNullableString(record.limitName),
+    primary: parseRateLimitWindow(record.primary),
+    secondary: parseRateLimitWindow(record.secondary),
+    credits: credits
+      ? {
+          hasCredits: credits.hasCredits === true,
+          unlimited: credits.unlimited === true,
+          balance: asNullableString(credits.balance)
+        }
+      : null,
+    planType: asNullableString(record.planType),
+    spendControlReached: typeof record.spendControlReached === "boolean"
+      ? record.spendControlReached
+      : null
+  };
+}
+
+export function parseCodexRateLimits(value: unknown): CodexRateLimits | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const rateLimitsByLimitIdRecord = asRecord(record.rateLimitsByLimitId);
+  const rateLimitsByLimitId: Record<string, CodexRateLimitSnapshot | null> = {};
+  if (rateLimitsByLimitIdRecord) {
+    for (const [limitId, snapshot] of Object.entries(rateLimitsByLimitIdRecord)) {
+      rateLimitsByLimitId[limitId] = parseRateLimitSnapshot(snapshot);
+    }
+  }
+
+  return {
+    rateLimits: parseRateLimitSnapshot(record.rateLimits),
+    rateLimitsByLimitId: rateLimitsByLimitIdRecord ? rateLimitsByLimitId : null,
+    accountId: asNullableString(record.accountId)
+  };
+}
+
+function parseCodexAccountUsage(value: unknown): CodexAccountUsage | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const summary = asRecord(record.summary);
+  const dailyUsageBuckets = Array.isArray(record.dailyUsageBuckets)
+    ? record.dailyUsageBuckets
+        .map((bucket) => {
+          const bucketRecord = asRecord(bucket);
+          if (!bucketRecord) {
+            return null;
+          }
+
+          return {
+            startDate: asNullableString(bucketRecord.startDate),
+            tokens: asNullableNumber(bucketRecord.tokens)
+          };
+        })
+        .filter((bucket) => bucket !== null)
+    : null;
+
+  return {
+    summary: summary
+      ? {
+          lifetimeTokens: asNullableNumber(summary.lifetimeTokens),
+          peakDailyTokens: asNullableNumber(summary.peakDailyTokens),
+          longestRunningTurnSec: asNullableNumber(summary.longestRunningTurnSec),
+          currentStreakDays: asNullableNumber(summary.currentStreakDays),
+          longestStreakDays: asNullableNumber(summary.longestStreakDays)
+        }
+      : null,
+    dailyUsageBuckets
+  };
 }
 
 interface JsonRpcRequest {
@@ -569,6 +687,62 @@ export class CodexAppServerWorker implements CodexWorker {
     }
   }
 
+  async readRateLimits(): Promise<CodexRateLimits | null> {
+    try {
+      await this.start();
+
+      const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
+        logger: this.logger,
+        label: "read-rate-limits",
+        authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
+      });
+      await connection.connect();
+
+      try {
+        const response = await connection.request("account/rateLimits/read", {});
+        return parseCodexRateLimits(response);
+      } finally {
+        await connection.close();
+      }
+    } catch (error) {
+      this.logger?.warn(
+        {
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "读取 Codex 账号额度失败"
+      );
+      return null;
+    }
+  }
+
+  async readAccountUsage(): Promise<CodexAccountUsage | null> {
+    try {
+      await this.start();
+
+      const connection = new AppServerWsConnection(this.env.CODEX_APP_SERVER_LISTEN_URL, {
+        logger: this.logger,
+        label: "read-account-usage",
+        authTokenFile: this.env.CODEX_APP_SERVER_WS_TOKEN_FILE
+      });
+      await connection.connect();
+
+      try {
+        const response = await connection.request("account/usage/read", {});
+        return parseCodexAccountUsage(response);
+      } finally {
+        await connection.close();
+      }
+    } catch (error) {
+      this.logger?.warn(
+        {
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "读取 Codex 账号累计用量失败"
+      );
+      return null;
+    }
+  }
+
   private async resumeThread(
     connection: AppServerWsConnection,
     context: CodexTurnContext & { threadId: string }
@@ -958,6 +1132,10 @@ export class CodexAppServerWorker implements CodexWorker {
     const params = (message.params ?? {}) as Record<string, unknown>;
     const targetThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
 
+    if (message.method === "account/rateLimits/updated") {
+      return;
+    }
+
     if (targetThreadId && targetThreadId !== threadId) {
       this.logger?.info(
         {
@@ -1289,18 +1467,35 @@ export class CodexAppServerWorker implements CodexWorker {
       const maybeError = params.error as
         | {
             message?: string;
+            additionalDetails?: string;
           }
         | undefined;
+      const errorText =
+        maybeError?.additionalDetails ?? maybeError?.message ?? "Codex App Server 返回错误";
+      // Codex 自己会对上游（chatgpt.com）的 TLS/网络抖动做自动重试，重试期间会发
+      // willRetry=true 的 error 通知。这不是最终失败，不能直接结束这一轮，
+      // 否则一次网络抖动就会把整个 turn 判失败。
+      if (params.willRetry === true) {
+        this.logger?.warn(
+          {
+            threadId,
+            turnId: state.currentTurnId,
+            error: maybeError?.message ?? "Codex 正在自动重试"
+          },
+          "Codex 正在自动重试（连接抖动），继续等待本轮结果"
+        );
+        return;
+      }
 
       queue.push({
         kind: "error",
-        message: normalizeCodexTurnErrorMessage(maybeError?.message ?? "Codex App Server 返回错误")
+        message: normalizeCodexTurnErrorMessage(errorText)
       });
       this.logger?.error(
         {
           threadId,
           turnId: state.currentTurnId,
-          error: maybeError?.message ?? "Codex App Server 返回错误"
+          error: errorText
         },
         "收到 Codex error 通知"
       );

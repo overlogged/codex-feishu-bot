@@ -249,7 +249,7 @@ function resolveKimiWorkspaceKey(baseDir: string, workspaceId: string): string {
   return `wd_${name}_${hash}`;
 }
 
-async function resolveKimiAcpWirePath(
+export async function resolveKimiAcpWirePath(
   threadId: string,
   workspaceId: string
 ): Promise<string> {
