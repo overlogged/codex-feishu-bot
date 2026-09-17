@@ -204,7 +204,15 @@ function currentMonthKey(): string {
   return `${now.getFullYear()}-${month}`;
 }
 
-function parseCcusageModelBreakdowns(entry: Record<string, unknown>): CcusageModelBreakdown[] {
+function normalizeCcusageModelName(value: string): string {
+  // 统一报告会给模型加 `[pi]` / `[claude]` 前缀去做 agent 区分；这里按 CLI 渲染，去掉前缀更易读。
+  return value.replace(/^\[[a-z0-9_-]+\]\s*/i, "").trim() || value;
+}
+
+function parseCcusageModelBreakdowns(
+  entry: Record<string, unknown>,
+  limit = 3
+): CcusageModelBreakdown[] {
   const breakdowns: CcusageModelBreakdown[] = [];
 
   if (Array.isArray(entry.modelBreakdowns)) {
@@ -215,7 +223,7 @@ function parseCcusageModelBreakdowns(entry: Record<string, unknown>): CcusageMod
       }
 
       breakdowns.push({
-        modelName: record.modelName,
+        modelName: normalizeCcusageModelName(record.modelName),
         totalTokens:
           numberOrNull(record.totalTokens) ??
           ((numberOrNull(record.inputTokens) ?? 0) +
@@ -236,7 +244,7 @@ function parseCcusageModelBreakdowns(entry: Record<string, unknown>): CcusageMod
         }
 
         breakdowns.push({
-          modelName,
+          modelName: normalizeCcusageModelName(modelName),
           totalTokens:
             numberOrNull(record.totalTokens) ??
             ((numberOrNull(record.inputTokens) ?? 0) +
@@ -252,7 +260,7 @@ function parseCcusageModelBreakdowns(entry: Record<string, unknown>): CcusageMod
 
   return breakdowns
     .sort((left, right) => (right.totalTokens ?? 0) - (left.totalTokens ?? 0))
-    .slice(0, 3);
+    .slice(0, limit);
 }
 
 function parseCcusageDaily(stdout: string): CcusageDailySummary[] {
@@ -282,7 +290,7 @@ function parseCcusageDaily(stdout: string): CcusageDailySummary[] {
       date,
       totalTokens: numberOrNull(entry.totalTokens),
       totalCost: numberOrNull(entry.totalCost) ?? numberOrNull(entry.costUSD),
-      topModels: parseCcusageModelBreakdowns(entry)
+      topModels: parseCcusageModelBreakdowns(entry, 5)
     });
   }
 
@@ -409,7 +417,7 @@ export class UsageStatsService {
       "【各 CLI 历史用量（本月，ccusage）】",
       ...ccusageLines,
       "",
-      `费用为 ccusage 按公开定价估算（USD 按汇率 ${this.usdToCnyRate} 折算为人民币），仅供参考。`
+      this.renderPricingNote()
     ].join("\n");
   }
 
@@ -421,7 +429,15 @@ export class UsageStatsService {
       "",
       ...lines,
       "",
-      `数据来源：ccusage（按自然日统计，费用为公开定价估算，USD 按汇率 ${this.usdToCnyRate} 折算为人民币）。`
+      this.renderPricingNote()
+    ].join("\n");
+  }
+
+  private renderPricingNote(): string {
+    return [
+      `费用说明：ccusage 按公开 API 定价估算，USD 按汇率 ${this.usdToCnyRate} 折算为人民币。`,
+      "订阅套餐（Kimi / Codex）的金额是按 API 价格的折算，不等于实际账单；自定义 provider 的价格取自本机 pi 的 models.json，配置为 0 就会显示 0。",
+      "仅供参考。"
     ].join("\n");
   }
 
@@ -612,6 +628,13 @@ export class UsageStatsService {
           row.totalCost !== null ? `，估算费用 ${this.formatCny(row.totalCost)}` : ""
         }`
       );
+      for (const model of row.topModels) {
+        lines.push(
+          `  · ${model.modelName}：${formatTokenCount(model.totalTokens)} token${
+            model.cost !== null ? `（${this.formatCny(model.cost)}）` : "（无单模型定价）"
+          }`
+        );
+      }
     }
 
     if (lines.length === 0) {

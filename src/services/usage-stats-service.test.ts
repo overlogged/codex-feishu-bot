@@ -125,7 +125,21 @@ function ccusageDailyFixture(totalTokens = 1_000_000, costUSD = 1): string {
       {
         date: localDateKey(),
         totalTokens,
-        costUSD
+        costUSD,
+        modelBreakdowns: [
+          {
+            modelName: "gpt-test",
+            inputTokens: totalTokens * 0.6,
+            outputTokens: totalTokens * 0.4,
+            cost: costUSD * 0.6
+          },
+          {
+            modelName: "gpt-test-mini",
+            inputTokens: totalTokens * 0.3,
+            outputTokens: totalTokens * 0.1,
+            cost: costUSD * 0.4
+          }
+        ]
       }
     ]
   });
@@ -217,7 +231,7 @@ test("UsageStatsService renders quota, cumulative usage and ccusage sections", a
   assert.match(report, /· gpt-5\.4：53\.29 亿 token/);
   assert.match(report, /Claude（[^）]+）：1234\.6 万 token，估算费用 ¥88\.89/);
   assert.match(report, /· gpt-5\.4：115\.0 万 token（¥18\.00）/);
-  assert.match(report, /按公开定价估算（USD 按汇率 7\.2 折算为人民币），仅供参考。/);
+  assert.match(report, /费用说明：ccusage 按公开 API 定价估算，USD 按汇率 7\.2 折算为人民币。/);
 });
 
 test("UsageStatsService renders Kimi fallback line when the client is missing or returns null", async () => {
@@ -350,6 +364,8 @@ test("UsageStatsService renders today's consumption and estimates the last hour"
 
   assert.match(report, /【今日消耗（ccusage，自然日）】/);
   assert.match(report, /Codex：100\.0 万 token，估算费用 ¥7\.20/);
+  assert.match(report, /· gpt-test：100\.0 万 token（¥4\.32）/);
+  assert.match(report, /· gpt-test-mini：40\.0 万 token（¥2\.88）/);
   assert.match(report, /合计：400\.0 万 token/);
   assert.match(report, /【近 1 小时消耗（估算）】/);
   assert.match(report, /Codex：60\.0 万 token/);
@@ -383,7 +399,7 @@ test("UsageStatsService builds a daily token report", async () => {
   const report = await service.buildDailyReport();
   assert.match(report, new RegExp(`Token 消耗日报（${localDateKey()}）`));
   assert.match(report, /Codex：200\.0 万 token，估算费用 ¥14\.40/);
-  assert.match(report, /数据来源：ccusage/);
+  assert.match(report, /费用说明：ccusage/);
 });
 
 test("collectRateLimitWindows dedupes snapshots shared between rateLimits and rateLimitsByLimitId", () => {
