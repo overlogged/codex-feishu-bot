@@ -572,6 +572,19 @@ export class KimiAcpSession {
     this.updateHandler = handler;
   }
 
+  /** ACP `session/set_config_option`：设置 model / reasoning_effort 等会话配置。 */
+  async setConfigOption(configId: string, value: string): Promise<void> {
+    if (!this.sessionId) {
+      return;
+    }
+
+    await this.request("session/set_config_option", {
+      sessionId: this.sessionId,
+      configId,
+      value
+    });
+  }
+
   prompt(text: string): Promise<{ stopReason?: string }> {
     if (!this.sessionId) {
       return Promise.reject(new Error(`${this.label} 会话还没有 sessionId。`));

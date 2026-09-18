@@ -63,12 +63,16 @@ export class DshAcpWorker implements CodexWorker {
   private readonly activeTurns = new Map<string, ActiveDshTurn>();
   private readonly runtime: KimiAcpRuntime;
 
+  private readonly reasoningEffort?: string;
+
   constructor(
-    env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE">,
+    env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE"> &
+      Partial<Pick<Env, "DSH_ACP_REASONING">>,
     private readonly logger?: LoggerLike,
     runtime?: KimiAcpRuntime
   ) {
     this.runtime = runtime ?? new HostDshAcpRuntime(env);
+    this.reasoningEffort = env.DSH_ACP_REASONING?.trim() || undefined;
   }
 
   supportsSteer(): boolean {
@@ -126,6 +130,23 @@ export class DshAcpWorker implements CodexWorker {
       kind: "thread_bound",
       threadId: sessionId
     };
+
+    // dsh ACP 会话默认没有 reasoning_effort，不设置的话模型不会输出思考过程。
+    if (this.reasoningEffort) {
+      try {
+        await session.setConfigOption("reasoning_effort", this.reasoningEffort);
+      } catch (error) {
+        this.logger?.warn(
+          {
+            chatId: context.message.chatId,
+            sessionId,
+            reasoningEffort: this.reasoningEffort,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          "DSH ACP 设置 reasoning_effort 失败，将使用会话默认值"
+        );
+      }
+    }
 
     const eventQueue = new AsyncEventQueue<CodexEvent>();
     const projector = new KimiAcpTurnProjector(turnId, DSH_LABEL);

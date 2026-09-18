@@ -77,6 +77,8 @@ const envSchema = z.object({
   KIMI_ACP_COMMAND: z.string().default("kimi"),
   DSH_ACP_COMMAND: z.string().default("dsh"),
   DSH_ACP_PROFILE: z.string().default("acp"),
+  /** dsh ACP 会话的 reasoning_effort；留空则不设置（模型不会输出思考过程）。 */
+  DSH_ACP_REASONING: z.string().default("high"),
   PI_CLI_COMMAND: z.string().default("pi"),
   PI_CLI_PROVIDER: optionalNonEmptyString.default("openrouter"),
   PI_CLI_MODEL: optionalNonEmptyString.default("deepseek-flash"),

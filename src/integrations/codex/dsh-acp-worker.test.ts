@@ -12,8 +12,10 @@ import type { KimiAcpRuntime } from "./kimi-acp-worker.js";
 function createFakeDshRuntime(): {
   runtime: KimiAcpRuntime;
   spawnOptions: Array<{ args: string[]; cwd: string }>;
+  configOptions: Array<Record<string, unknown>>;
 } {
   const spawnOptions: Array<{ args: string[]; cwd: string }> = [];
+  const configOptions: Array<Record<string, unknown>> = [];
   const runtime: KimiAcpRuntime = {
     spawnProcess(options) {
       spawnOptions.push({ args: options.args, cwd: options.context.workspaceId });
@@ -59,6 +61,14 @@ function createFakeDshRuntime(): {
 
           if (message.method === "session/new" && message.id !== undefined) {
             write({ jsonrpc: "2.0", id: message.id, result: { sessionId: "dsh_session_1" } });
+            continue;
+          }
+
+          if (message.method === "session/set_config_option" && message.id !== undefined) {
+            configOptions.push(
+              (message as { params?: Record<string, unknown> }).params ?? {}
+            );
+            write({ jsonrpc: "2.0", id: message.id, result: { configOptions: [] } });
             continue;
           }
 
@@ -108,7 +118,7 @@ function createFakeDshRuntime(): {
     }
   };
 
-  return { runtime, spawnOptions };
+  return { runtime, spawnOptions, configOptions };
 }
 
 function buildMessage(): IncomingChatMessage {
@@ -139,9 +149,9 @@ async function collectEvents(worker: DshAcpWorker, threadId: string): Promise<Co
 }
 
 test("DshAcpWorker runs a turn over ACP and binds the new session", async () => {
-  const { runtime, spawnOptions } = createFakeDshRuntime();
+  const { runtime, spawnOptions, configOptions } = createFakeDshRuntime();
   const worker = new DshAcpWorker(
-    { DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp" },
+    { DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp", DSH_ACP_REASONING: "high" },
     undefined,
     runtime
   );
@@ -176,6 +186,10 @@ test("DshAcpWorker runs a turn over ACP and binds the new session", async () => 
     )
   );
   assert.deepEqual(spawnOptions, [{ args: ["--profile", "acp"], cwd: "/tmp/dsh-workspace" }]);
+  // dsh ACP 默认没有 reasoning_effort，必须显式设置，否则不会输出思考过程。
+  assert.deepEqual(configOptions, [
+    { sessionId: "dsh_session_1", configId: "reasoning_effort", value: "high" }
+  ]);
 
   await worker.close();
 });
