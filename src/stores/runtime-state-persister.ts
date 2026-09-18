@@ -103,7 +103,9 @@ export interface RuntimeRestoreResult {
 }
 
 function normalizeCli(value: unknown): ChatCli {
-  return value === "claude" || value === "kimi" || value === "pi" ? value : "codex";
+  return value === "claude" || value === "kimi" || value === "pi" || value === "dsh"
+    ? value
+    : "codex";
 }
 
 export class RuntimeStatePersister {

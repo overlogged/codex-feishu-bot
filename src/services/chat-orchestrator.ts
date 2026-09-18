@@ -170,6 +170,8 @@ function renderCliLabel(cli: ChatCli): string {
       return "Kimi";
     case "pi":
       return "Pi";
+    case "dsh":
+      return "DSH";
     case "codex":
     default:
       return "Codex";
@@ -199,44 +201,49 @@ function extractGroupBindingCommand(
 
   const lowerParts = parts.map((part) => part.toLowerCase());
   const cliCandidate = lowerParts.find((part) =>
-    ["codex", "claude", "kimi", "pi", "deepseek", "ds", "ds4"].includes(part)
+    ["codex", "claude", "kimi", "pi", "dsh", "deepseek", "ds", "ds4"].includes(part)
   );
 
+  // ds / deepseek 默认交给 dsh（DeepSeek Harness）；显式 pi 时才走 pi。
   const cli: ChatCli =
-    cliCandidate === "deepseek" ||
-    cliCandidate === "ds" ||
-    cliCandidate === "ds4" ||
-    cliCandidate === "pi"
-      ? "pi"
-      : cliCandidate === "claude"
-        ? "claude"
-        : cliCandidate === "codex"
-          ? "codex"
-          : "codex";
+    cliCandidate === "deepseek" || cliCandidate === "ds" || cliCandidate === "ds4"
+      ? "dsh"
+      : cliCandidate === "pi"
+        ? "pi"
+        : cliCandidate === "dsh"
+          ? "dsh"
+          : cliCandidate === "claude"
+            ? "claude"
+            : cliCandidate === "codex"
+              ? "codex"
+              : "codex";
 
+  // dsh 的模型/provider 由 profile 配置决定，这里不再注入 model/thinking。
   const model: string | undefined =
-    /(?:gpt\s*-?\s*6|gpt6|gpt-6|astra)/i.test(normalizedText)
-      ? "gpt-6-astra"
-      : /(?:gpt\s*-?\s*)?5\.6(?:\s*-?\s*(?:sol|soul))?/i.test(normalizedText)
-        ? "gpt-5.6-sol"
-        : normalizedText.includes("ds4.1 flash") ||
-            normalizedText.includes("v4.1 flash") ||
-            normalizedText.includes("ds4 flash") ||
-            normalizedText.includes("v4 flash")
-          ? PI_DS_FLASH_MODEL
-          : normalizedText.includes("ds4 pro") ||
-        normalizedText.includes("v4 pro")
-              ? PI_DS_FLASH_MODEL
-              : normalizedText.includes("deepseek") ||
-        normalizedText.includes("ds4.1") ||
-        normalizedText.includes("ds4") ||
-        lowerParts.includes("ds")
+    cli === "dsh"
+      ? undefined
+      : /(?:gpt\s*-?\s*6|gpt6|gpt-6|astra)/i.test(normalizedText)
+        ? "gpt-6-astra"
+        : /(?:gpt\s*-?\s*)?5\.6(?:\s*-?\s*(?:sol|soul))?/i.test(normalizedText)
+          ? "gpt-5.6-sol"
+          : normalizedText.includes("ds4.1 flash") ||
+              normalizedText.includes("v4.1 flash") ||
+              normalizedText.includes("ds4 flash") ||
+              normalizedText.includes("v4 flash")
+            ? PI_DS_FLASH_MODEL
+            : normalizedText.includes("ds4 pro") ||
+          normalizedText.includes("v4 pro")
                 ? PI_DS_FLASH_MODEL
-                : undefined;
+                : normalizedText.includes("deepseek") ||
+          normalizedText.includes("ds4.1") ||
+          normalizedText.includes("ds4") ||
+          lowerParts.includes("ds")
+                  ? PI_DS_FLASH_MODEL
+                  : undefined;
   const thinkingCandidate = lowerParts.find((part) =>
     ["low", "medium", "high", "xhigh", "max", "ultra"].includes(part)
   );
-  const thinking = thinkingCandidate;
+  const thinking = cli === "dsh" ? undefined : thinkingCandidate;
 
   if (parts.length === 1 && code === parts[0]) {
     return {
@@ -2661,7 +2668,10 @@ export class ChatOrchestrator {
   }
 
   private canInterruptForLatestMessage(cli: ChatCli): boolean {
-    return (cli === "kimi" || cli === "pi" || cli === "claude") && Boolean(this.codexWorker.interruptTurn);
+    return (
+      (cli === "kimi" || cli === "pi" || cli === "claude" || cli === "dsh") &&
+      Boolean(this.codexWorker.interruptTurn)
+    );
   }
 
   private isDuplicateIncomingMessage(message: IncomingChatMessage): boolean {

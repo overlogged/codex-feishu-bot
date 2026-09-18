@@ -150,6 +150,8 @@ function renderCliLabel(cli: string): string {
       return "Kimi";
     case "pi":
       return "Pi";
+    case "dsh":
+      return "DSH";
     case "codex":
     default:
       return "Codex";

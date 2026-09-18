@@ -1,4 +1,4 @@
-export const CHAT_CLI_VALUES = ["codex", "claude", "kimi", "pi"] as const;
+export const CHAT_CLI_VALUES = ["codex", "claude", "kimi", "pi", "dsh"] as const;
 export type ChatCli = (typeof CHAT_CLI_VALUES)[number];
 
 export interface IncomingChatMessage {

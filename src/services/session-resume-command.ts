@@ -27,6 +27,9 @@ export function buildSessionResumeCommand(
       return `${cd} && ${commands.claude ?? "claude"} --resume ${quoteArg(threadId)}`;
     case "pi":
       return `${cd} && ${commands.pi ?? "pi"} --session ${quoteArg(threadId)}`;
+    case "dsh":
+      // dsh 的会话恢复走 ACP / Web UI，没有等价的 CLI resume 子命令。
+      return `${cd} && ${commands.dsh ?? "dsh"} web  # 在 Web UI 打开会话 ${quoteArg(threadId)}`;
   }
 }
 

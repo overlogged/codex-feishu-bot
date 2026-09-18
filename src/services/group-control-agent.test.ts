@@ -463,10 +463,10 @@ test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent as V4.1 Flas
   assert.deepEqual(result.intents, [
     {
       kind: "bind_workspace",
-      cli: "pi",
+      cli: "dsh",
       code: "2",
       provider: undefined,
-      model: "deepseek-flash",
+      model: undefined,
       thinking: undefined
     }
   ]);

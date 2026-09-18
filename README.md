@@ -126,6 +126,7 @@ pnpm host:smoke
 - `codex`：连接宿主机 `codex app-server`（WebSocket JSON-RPC）
 - `kimi`：启动 `kimi acp`（Agent Client Protocol，stdio JSON-RPC），按群复用长驻会话
 - `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；活跃 turn 内收到新消息会用 `abort` 打断当前 turn，再用最新消息立即重跑
+- `dsh`：启动 `dsh --profile acp`（DeepSeek Harness 的 ACP v1 stdio 协议），按群复用长驻会话；`ds` / `deepseek` 默认走这个后端，模型/provider 由 `~/.dsh/settings.yaml` 的 profile 配置决定
 - `claude`：仍为一次性 CLI 调用
 
 默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的一级子目录，不能直接把仓库根目录当运行工作区。
@@ -151,6 +152,7 @@ Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-5.6-sol`，�
 - 或 `@机器人 kimi 12`
 - 或 `@机器人 pi 12`
 - 或 `@机器人 pi ds4 flash 12`
+- 或 `@机器人 ds 12`（`ds` / `deepseek` 默认绑定 dsh 后端）
 - 或自然语言，例如 `@机器人 把这个群切到 12 号目录`
 
 ## 额度与用量统计

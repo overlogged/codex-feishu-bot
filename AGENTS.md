@@ -44,6 +44,7 @@ Only stop for those checkpoints. Do not push routine console clicking back onto 
 - Keep Codex runtime work under `DEFAULT_WORKSPACE`, which defaults to `/home/overlogged`. Do not treat the repository checkout as the runtime workspace.
 - Group chats must bind a subdirectory under `DEFAULT_WORKSPACE` before they can start tasks.
 - The group binding flow is: private-chat the bot with `工作区` to get numbered subdirectories, then `@bot <编号>` inside the group to bind it.
+- `ds` / `deepseek` bindings now default to the `dsh` CLI backend (DeepSeek Harness via `dsh --profile acp`, ACP v1 stdio). dsh's model/provider come from `~/.dsh/settings.yaml` (currently the `openmodel` gateway profile); `pi` remains available explicitly (e.g. `@bot pi 12`, or `pi` + GLM/openmodel). `DSH_ACP_COMMAND`/`DSH_ACP_PROFILE` override the command/profile.
 - Default sessions should run in yolo mode: `CODEX_APP_SERVER_APPROVAL_POLICY=never` and `CODEX_APP_SERVER_SANDBOX=danger-full-access`.
 - Keep generated user-facing files under `CODEX_ARTIFACTS_DIR` unless the user explicitly asks to write into the repository itself.
 - Never commit `.env.real` or local browser profile data.

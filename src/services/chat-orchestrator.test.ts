@@ -1671,7 +1671,7 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi";
+        cli: "codex" | "claude" | "kimi" | "pi" | "dsh";
         code: string;
       }
     | undefined;

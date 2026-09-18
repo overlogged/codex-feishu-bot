@@ -164,19 +164,18 @@ function normalizeCli(value: string): ChatCli {
     normalized === "claude" ||
     normalized === "kimi" ||
     normalized === "pi" ||
-    normalized === "deepseek" ||
-    normalized === "ds" ||
-    normalized === "ds4" ||
-    normalized === "glm" ||
-    normalized === "openmodel"
+    normalized === "dsh"
   ) {
-    return normalized === "deepseek" ||
-      normalized === "ds" ||
-      normalized === "ds4" ||
-      normalized === "glm" ||
-      normalized === "openmodel"
-      ? "pi"
-      : normalized;
+    return normalized;
+  }
+
+  // ds / deepseek 默认交给 dsh（DeepSeek Harness）；glm / openmodel 仍走 pi。
+  if (normalized === "deepseek" || normalized === "ds" || normalized === "ds4") {
+    return "dsh";
+  }
+
+  if (normalized === "glm" || normalized === "openmodel") {
+    return "pi";
   }
 
   throw new Error(`控制 agent 返回了不支持的 CLI：${value}`);
@@ -210,15 +209,18 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
         kind,
         goal: requireString(parsed, "goal")
       };
-    case "bind_workspace":
+    case "bind_workspace": {
+      const cli = normalizeCli(requireString(parsed, "cli"));
       return {
         kind,
-        cli: normalizeCli(requireString(parsed, "cli")),
+        cli,
         code: requireString(parsed, "code"),
-        provider: optionalString(parsed, "provider"),
-        model: optionalString(parsed, "model"),
-        thinking: optionalString(parsed, "thinking")
+        // dsh 的模型/provider 由 profile 配置决定，忽略控制 agent 可能多填的字段。
+        provider: cli === "dsh" ? undefined : optionalString(parsed, "provider"),
+        model: cli === "dsh" ? undefined : optionalString(parsed, "model"),
+        thinking: cli === "dsh" ? undefined : optionalString(parsed, "thinking")
       };
+    }
     case "create_schedule":
       return {
         kind,
@@ -383,9 +385,9 @@ function buildInterpreterPrompt(
     "- 绑定到 Codex 且用户没有指定模型时，model 默认返回 gpt-6-astra。",
     "- Codex 思考深度可指定 low / medium / high / xhigh / max / ultra；用户说低/中/高/嗨/极高/最高/超强时分别规范为对应英文值。",
     "- 绑定到 Codex 且用户没有指定思考深度时，thinking 默认返回 high。",
-    "- 用户说 'deepseek'、'ds'、'ds4'、'ds4.1'、'DeepSeek V4 Flash'、'DS4 Flash'、'DeepSeek V4.1 Flash'、'DS4.1 Flash' 时，cli 应该返回 pi，model 返回 deepseek-flash；用户说 'DeepSeek V4 Pro'、'DS4 Pro' 时也返回 pi + deepseek-flash（Pro 已下线，统一用 V4.1 Flash）。",
-    "- 用户说 'GLM'、'GLM Flash'、'GLM 5.3 Flash'、'glm flash'、'openmodel' 时，cli 应该返回 pi，provider 返回 openmodel，model 返回 glm-5.3-flash；GLM 只能绑定到 pi，不要给 codex/kimi/claude 填 glm 模型。",
-    "- 用户说 'pi'、'ds' 或 'deepseek' 但没有指定模型时，不填 model；用户明确说 V4 Flash / V4.1 Flash / DS4 Flash / DS4.1 Flash 时，必须填上对应 model（V4 Pro / DS4 Pro 一律规范为 deepseek-flash）。",
+    "- 用户说 'deepseek'、'ds'、'ds4'、'ds4.1'、'DeepSeek V4 Flash'、'DS4 Flash'、'DeepSeek V4.1 Flash'、'DS4.1 Flash'、'DeepSeek V4 Pro'、'DS4 Pro' 时，cli 返回 dsh（DeepSeek Harness），不要填 model/provider，dsh 的模型由 profile 配置决定。",
+    "- 用户说 'GLM'、'GLM Flash'、'GLM 5.3 Flash'、'glm flash'、'openmodel' 时，cli 应该返回 pi，provider 返回 openmodel，model 返回 glm-5.3-flash；GLM 只能绑定到 pi，不要给 codex/kimi/claude/dsh 填 glm 模型。",
+    "- 用户明确说 'pi' 时 cli 返回 pi；用户说 'dsh' 时 cli 返回 dsh。绑定 dsh 时不要填 model、provider、thinking。",
     "- provider 字段只在用户明确指定时才填，否则省略（让运行时按环境变量或默认规则处理）。",
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",

@@ -41,7 +41,7 @@ export type KimiAcpSpawnProcess = (options: {
   args: string[];
 }) => KimiAcpProcessHandle;
 
-async function terminateChildProcess(child: KimiAcpChild): Promise<void> {
+export async function terminateChildProcess(child: KimiAcpChild): Promise<void> {
   if (child.killed || child.exitCode !== null) {
     return;
   }
@@ -191,7 +191,10 @@ export class KimiAcpTurnProjector {
   private toolSequence = 0;
   private readonly toolStateByCallId = new Map<string, AcpToolState>();
 
-  constructor(private readonly turnId: string) {
+  constructor(
+    private readonly turnId: string,
+    private readonly label = "Kimi ACP"
+  ) {
     this.commentaryItemId = `assistant:${turnId}:commentary`;
     this.finalItemId = `assistant:${turnId}:final`;
   }
@@ -271,8 +274,8 @@ export class KimiAcpTurnProjector {
       events.push({
         kind: "error",
         message: this.commentaryStarted
-          ? "Kimi ACP 没有返回最终答复。"
-          : "Kimi ACP 没有返回可见内容。"
+          ? `${this.label} 没有返回最终答复。`
+          : `${this.label} 没有返回可见内容。`
       });
     }
 
@@ -467,7 +470,7 @@ interface PendingRequest {
   reject(error: Error): void;
 }
 
-class KimiAcpSession {
+export class KimiAcpSession {
   private readonly pending = new Map<number, PendingRequest>();
   private nextRequestId = 1;
   private updateHandler?: (update: Record<string, unknown>) => void;
@@ -482,7 +485,8 @@ class KimiAcpSession {
   constructor(
     private readonly handle: KimiAcpProcessHandle,
     private readonly workspaceId: string,
-    private readonly logger?: LoggerLike
+    private readonly logger?: LoggerLike,
+    private readonly label = "Kimi ACP"
   ) {
     const child = handle.child;
     this.child = child;
@@ -495,13 +499,13 @@ class KimiAcpSession {
       if (text) {
         this.logger?.warn(
           { workspaceId: this.workspaceId, stderr: truncateText(text, 500) },
-          "Kimi ACP 进程 stderr"
+          `${this.label} 进程 stderr`
         );
       }
     });
     child.once("close", (code, signal) => {
       this.closed = true;
-      const error = new Error(`Kimi ACP 进程已退出 (code=${code ?? "null"}, signal=${signal ?? "null"})。`);
+      const error = new Error(`${this.label} 进程已退出 (code=${code ?? "null"}, signal=${signal ?? "null"})。`);
       for (const pending of this.pending.values()) {
         pending.reject(error);
       }
@@ -546,7 +550,7 @@ class KimiAcpSession {
             threadId,
             error: error instanceof Error ? error.message : String(error)
           },
-          "Kimi ACP session/resume 失败，改为创建新会话"
+          `${this.label} session/resume 失败，改为创建新会话`
         );
       }
     }
@@ -557,7 +561,7 @@ class KimiAcpSession {
     })) as Record<string, unknown>;
     const sessionId = result.sessionId;
     if (typeof sessionId !== "string" || !sessionId) {
-      throw new Error("Kimi ACP session/new 没有返回 sessionId。");
+      throw new Error(`${this.label} session/new 没有返回 sessionId。`);
     }
 
     this.sessionId = sessionId;
@@ -570,7 +574,7 @@ class KimiAcpSession {
 
   prompt(text: string): Promise<{ stopReason?: string }> {
     if (!this.sessionId) {
-      return Promise.reject(new Error("Kimi ACP 会话还没有 sessionId。"));
+      return Promise.reject(new Error(`${this.label} 会话还没有 sessionId。`));
     }
 
     const run = this.runPrompt(text);
@@ -636,7 +640,7 @@ class KimiAcpSession {
 
   private request(method: string, params: unknown): Promise<unknown> {
     if (!this.isAlive()) {
-      return Promise.reject(new Error("Kimi ACP 进程不可用。"));
+      return Promise.reject(new Error(`${this.label} 进程不可用。`));
     }
 
     const id = this.nextRequestId++;
@@ -659,7 +663,7 @@ class KimiAcpSession {
           workspaceId: this.workspaceId,
           error: error instanceof Error ? error.message : String(error)
         },
-        "Kimi ACP 写入请求失败"
+        `${this.label} 写入请求失败`
       );
     }
   }
@@ -676,7 +680,7 @@ class KimiAcpSession {
     } catch {
       this.logger?.warn(
         { workspaceId: this.workspaceId, line: truncateText(trimmed, 300) },
-        "Kimi ACP 输出了一行非 JSON 内容"
+        `${this.label} 输出了一行非 JSON 内容`
       );
       return;
     }
