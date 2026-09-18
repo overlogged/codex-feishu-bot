@@ -24,6 +24,27 @@ interface InteractiveCard {
 interface AssistantCardSplitOptions {
   maxTablesPerChunk?: number;
   maxCharsPerChunk?: number;
+  /**
+   * 强制渲染成单条卡片；超过这个长度时保留首尾并省略中间，
+   * 避免长思考过程被拆成十几条飞书消息。
+   */
+  singleCardMaxChars?: number;
+}
+
+/** 长内容单卡片截断：保留开头和结尾，中间省略。 */
+function truncateSingleCardBody(body: string, maxChars: number): string {
+  if (body.length <= maxChars) {
+    return body;
+  }
+
+  const headChars = Math.floor(maxChars * 0.65);
+  const tailChars = Math.max(0, maxChars - headChars);
+  const omitted = body.length - maxChars;
+  return [
+    body.slice(0, headChars),
+    `> …（内容过长，已省略中间 ${omitted} 字）…`,
+    body.slice(-tailChars)
+  ].join("\n\n");
 }
 
 function markdownBlock(content: string): Record<string, unknown> {
@@ -223,6 +244,9 @@ export function splitAssistantCardBodies(
   const maxTablesPerChunk = options.maxTablesPerChunk ?? 3;
   const maxCharsPerChunk = options.maxCharsPerChunk ?? 5500;
   const normalized = normalizeAssistantBody(item);
+  if (options.singleCardMaxChars !== undefined) {
+    return [truncateSingleCardBody(normalized, options.singleCardMaxChars)];
+  }
   const blocks = splitMarkdownBlocks(normalized).flatMap((block) => splitLongBlock(block, maxCharsPerChunk));
 
   if (blocks.length === 0) {

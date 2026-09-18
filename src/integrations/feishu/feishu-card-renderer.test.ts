@@ -117,6 +117,20 @@ test("splitAssistantCardBodies splits final answers with many markdown tables", 
   assert.match(bodies[1] ?? "", /说明三/);
 });
 
+test("splitAssistantCardBodies keeps long commentary in a single truncated card", () => {
+  const content = `思考开始\n${"内".repeat(20_000)}\n思考结束`;
+  const bodies = splitAssistantCardBodies(
+    createItem({ source: "commentary", content }),
+    { singleCardMaxChars: 12_000 }
+  );
+
+  assert.equal(bodies.length, 1);
+  assert.match(bodies[0] ?? "", /思考开始/);
+  assert.match(bodies[0] ?? "", /思考结束/);
+  assert.match(bodies[0] ?? "", /内容过长，已省略中间/);
+  assert.ok((bodies[0] ?? "").length < content.length);
+});
+
 test("renderToolCardContent emits markdown blocks for tool progress", () => {
   const payload = JSON.parse(
     renderToolCardContent(

@@ -20,6 +20,11 @@ interface AssistantDeliveryPlan {
   hash: string;
 }
 
+/** 思考过程单条卡片的最大字符数，超出时保留首尾。 */
+const ASSISTANT_COMMENTARY_MAX_CHARS = 12_000;
+/** 结果卡片单条拆分的字符阈值；放大以减少消息条数。 */
+const ASSISTANT_FINAL_MAX_CHARS = 12_000;
+
 export class ConversationDeliveryService {
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly inFlight = new Map<string, Promise<void>>();
@@ -121,7 +126,14 @@ export class ConversationDeliveryService {
       return;
     }
 
-    let plan = this.buildAssistantDeliveryPlan(item);
+    // 思考过程和结果各自只发一条消息：思考过程单卡片（过长时截断首尾），
+    // 结果正常拆分但把阈值放大，避免一个 turn 被拆成十几条飞书消息。
+    let plan = this.buildAssistantDeliveryPlan(
+      item,
+      item.source === "commentary"
+        ? { singleCardMaxChars: ASSISTANT_COMMENTARY_MAX_CHARS }
+        : { maxCharsPerChunk: ASSISTANT_FINAL_MAX_CHARS }
+    );
     if (item.deliveredContentHash === plan.hash) {
       return;
     }
@@ -150,6 +162,7 @@ export class ConversationDeliveryService {
     options?: {
       maxTablesPerChunk?: number;
       maxCharsPerChunk?: number;
+      singleCardMaxChars?: number;
     }
   ): AssistantDeliveryPlan {
     const contents = splitAssistantCardBodies(item, options).map((body) =>
@@ -270,6 +283,12 @@ export class ConversationDeliveryService {
       .join(" ")
       .toLowerCase();
 
-    return text.includes("card table number over limit") || text.includes("11310");
+    return (
+      text.includes("card table number over limit") ||
+      text.includes("11310") ||
+      text.includes("too long") ||
+      text.includes("exceed") ||
+      text.includes("content length")
+    );
   }
 }

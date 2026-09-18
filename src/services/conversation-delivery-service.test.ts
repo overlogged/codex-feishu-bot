@@ -412,3 +412,39 @@ test("ConversationDeliveryService splits large assistant cards into multiple mes
   assert.equal(stored?.feishuMessageId, "om_card_1");
   assert.ok(stored?.deliveredContentHash);
 });
+
+test("ConversationDeliveryService keeps long commentary in a single card", async () => {
+  const sentCards: string[] = [];
+  const conversationStore = new ConversationStore();
+  const service = new ConversationDeliveryService(
+    {
+      sendText: async () => "om_text_1",
+      updateText: async () => undefined,
+      sendCard: async (input) => {
+        sentCards.push(input.content);
+        return `om_card_${sentCards.length}`;
+      },
+      updateCard: async () => undefined,
+      sendFile: async () => "om_file_1"
+    },
+    conversationStore,
+    1,
+    console
+  );
+
+  conversationStore.save(
+    createItem({
+      source: "commentary",
+      phase: "completed",
+      content: `思考开始\n${"内".repeat(30_000)}\n思考结束`
+    })
+  );
+
+  await service.flush("run_1", "msg_1");
+
+  const stored = conversationStore.get("run_1", "msg_1");
+  assert.equal(sentCards.length, 1);
+  assert.deepEqual(stored?.feishuMessageIds, ["om_card_1"]);
+  assert.match(sentCards[0] ?? "", /内容过长，已省略中间/);
+  assert.match(sentCards[0] ?? "", /思考结束/);
+});
