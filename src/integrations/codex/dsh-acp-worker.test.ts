@@ -9,13 +9,18 @@ import type { CodexEvent, IncomingChatMessage } from "../../domain/types.js";
 import { DshAcpWorker } from "./dsh-acp-worker.js";
 import type { KimiAcpRuntime } from "./kimi-acp-worker.js";
 
-function createFakeDshRuntime(): {
+function createFakeDshRuntime(
+  fakeOptions: { thinkingOnlyFirstPrompt?: boolean; thinkingOnly?: boolean } = {}
+): {
   runtime: KimiAcpRuntime;
   spawnOptions: Array<{ args: string[]; cwd: string }>;
   configOptions: Array<Record<string, unknown>>;
+  promptTexts: string[];
 } {
   const spawnOptions: Array<{ args: string[]; cwd: string }> = [];
   const configOptions: Array<Record<string, unknown>> = [];
+  const promptTexts: string[] = [];
+  let promptCount = 0;
   const runtime: KimiAcpRuntime = {
     spawnProcess(options) {
       spawnOptions.push({ args: options.args, cwd: options.context.workspaceId });
@@ -74,6 +79,9 @@ function createFakeDshRuntime(): {
 
           if (message.method === "session/prompt" && message.id !== undefined) {
             const id = message.id;
+            const params = (message as { params?: { prompt?: Array<{ text?: string }> } }).params;
+            promptTexts.push(params?.prompt?.[0]?.text ?? "");
+            promptCount += 1;
             setImmediate(() => {
               write({
                 jsonrpc: "2.0",
@@ -86,17 +94,22 @@ function createFakeDshRuntime(): {
                   }
                 }
               });
-              write({
-                jsonrpc: "2.0",
-                method: "session/update",
-                params: {
-                  sessionId: "dsh_session_1",
-                  update: {
-                    sessionUpdate: "agent_message_chunk",
-                    content: { type: "text", text: "OK" }
+              const thinkingOnly =
+                fakeOptions.thinkingOnly === true ||
+                (fakeOptions.thinkingOnlyFirstPrompt === true && promptCount === 1);
+              if (!thinkingOnly) {
+                write({
+                  jsonrpc: "2.0",
+                  method: "session/update",
+                  params: {
+                    sessionId: "dsh_session_1",
+                    update: {
+                      sessionUpdate: "agent_message_chunk",
+                      content: { type: "text", text: "OK" }
+                    }
                   }
-                }
-              });
+                });
+              }
               write({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
             });
             continue;
@@ -118,7 +131,7 @@ function createFakeDshRuntime(): {
     }
   };
 
-  return { runtime, spawnOptions, configOptions };
+  return { runtime, spawnOptions, configOptions, promptTexts };
 }
 
 function buildMessage(): IncomingChatMessage {
@@ -190,6 +203,55 @@ test("DshAcpWorker runs a turn over ACP and binds the new session", async () => 
   assert.deepEqual(configOptions, [
     { sessionId: "dsh_session_1", configId: "reasoning_effort", value: "high" }
   ]);
+
+  await worker.close();
+});
+
+test("DshAcpWorker retries once when a turn returns thinking but no final answer", async () => {
+  const { runtime, promptTexts } = createFakeDshRuntime({ thinkingOnlyFirstPrompt: true });
+  const worker = new DshAcpWorker(
+    { DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp", DSH_ACP_REASONING: "high" },
+    undefined,
+    runtime
+  );
+
+  const events = await collectEvents(worker, "pending:dsh-acp:retry");
+
+  assert.equal(promptTexts.length, 2);
+  assert.match(promptTexts[1] ?? "", /最终答复/);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "assistant_message_completed" &&
+        event.text === "OK" &&
+        event.itemId.includes(":final")
+    )
+  );
+  assert.ok(!events.some((event) => event.kind === "error"));
+
+  await worker.close();
+});
+
+test("DshAcpWorker promotes thinking to the final answer when no text is ever produced", async () => {
+  const { runtime, promptTexts } = createFakeDshRuntime({ thinkingOnly: true });
+  const worker = new DshAcpWorker(
+    { DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp", DSH_ACP_REASONING: "high" },
+    undefined,
+    runtime
+  );
+
+  const events = await collectEvents(worker, "pending:dsh-acp:promote");
+
+  assert.equal(promptTexts.length, 2);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.kind === "assistant_message_completed" &&
+        event.text.includes("先想一下。") &&
+        event.itemId.includes(":final")
+    )
+  );
+  assert.ok(!events.some((event) => event.kind === "error"));
 
   await worker.close();
 });

@@ -164,7 +164,27 @@ export class DshAcpWorker implements CodexWorker {
 
     void (async () => {
       try {
-        const result = await session.prompt(buildCliTurnInput(context));
+        let result = await session.prompt(buildCliTurnInput(context));
+        // dsh 有时（尤其是定时任务、工具调用之后）只输出思考过程、不输出正文，
+        // 这里补一轮索要最终答复，避免用户只看到错误而没有回复。
+        if (
+          !activeTurn.interrupted &&
+          result.stopReason !== "cancelled" &&
+          !projector.hasFinalAnswer() &&
+          projector.hasCommentary()
+        ) {
+          this.logger?.warn(
+            {
+              chatId: context.message.chatId,
+              messageId: context.message.messageId,
+              sessionId
+            },
+            "DSH ACP 只返回了思考过程，追加一轮索要最终答复"
+          );
+          result = await session.prompt(
+            "请基于上面的分析，用中文直接给出最终答复，不要再只输出思考，也不要再调用工具。"
+          );
+        }
         const cancelled = activeTurn.interrupted || result.stopReason === "cancelled";
         for (const event of projector.finalize({ cancelled })) {
           eventQueue.push(event);

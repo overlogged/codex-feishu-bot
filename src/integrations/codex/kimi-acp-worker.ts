@@ -203,6 +203,14 @@ export class KimiAcpTurnProjector {
     return this.commentaryStarted || this.finalStarted || this.toolSequence > 0;
   }
 
+  hasFinalAnswer(): boolean {
+    return this.finalText.trim().length > 0;
+  }
+
+  hasCommentary(): boolean {
+    return this.commentaryText.trim().length > 0;
+  }
+
   announceQueued(): CodexEvent[] {
     const itemId = `assistant:${this.turnId}:notice`;
     const text =
@@ -271,12 +279,22 @@ export class KimiAcpTurnProjector {
     }
 
     if (!options.cancelled && !this.finalStarted) {
-      events.push({
-        kind: "error",
-        message: this.commentaryStarted
-          ? `${this.label} 没有返回最终答复。`
-          : `${this.label} 没有返回可见内容。`
-      });
+      // 有的模型（尤其是 dsh 上的 openmodel deepseek）会只输出思考、不输出正文。
+      // 把思考内容提升为最终答复，至少给用户一个可见回复，而不是整轮报错。
+      const fallback = this.commentaryText.trim();
+      if (fallback) {
+        events.push(...this.ensureFinalStarted());
+        events.push({
+          kind: "assistant_message_completed",
+          itemId: this.finalItemId,
+          text: fallback
+        });
+      } else {
+        events.push({
+          kind: "error",
+          message: `${this.label} 没有返回可见内容。`
+        });
+      }
     }
 
     return events;
