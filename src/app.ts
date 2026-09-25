@@ -37,6 +37,7 @@ import { FileBackedChatWorkspaceResolver } from "./services/chat-workspace-resol
 import { ConversationDeliveryService } from "./services/conversation-delivery-service.js";
 import { MessageProjector } from "./services/message-projector.js";
 import { UsageStatsService } from "./services/usage-stats-service.js";
+import { CodexAuthService } from "./services/codex-auth-service.js";
 import { TokenDailyReportService } from "./services/token-daily-report-service.js";
 import { ConversationStore } from "./stores/conversation-store.js";
 import { RunStore } from "./stores/run-store.js";
@@ -165,6 +166,13 @@ export function buildAppRuntime(env: Env): AppRuntime {
       defaultTime: env.TOKEN_DAILY_REPORT_TIME
     }
   );
+  const codexAuthService = new CodexAuthService(
+    {
+      command: env.CODEX_AUTH_COMMAND,
+      registryFile: env.CODEX_AUTH_REGISTRY_FILE
+    },
+    app.log
+  );
   const orchestrator = new ChatOrchestrator(
     sessionStore,
     runStore,
@@ -185,7 +193,8 @@ export function buildAppRuntime(env: Env): AppRuntime {
       pi: env.PI_CLI_COMMAND
     },
     usageStatsService,
-    env.TOKEN_DAILY_REPORT_TIME
+    env.TOKEN_DAILY_REPORT_TIME,
+    codexAuthService
   );
   const agentManager = new AgentManagerService(
     env.DEFAULT_WORKSPACE,

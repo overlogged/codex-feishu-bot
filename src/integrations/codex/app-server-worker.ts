@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { Env } from "../../config/env.js";
+import { codexProxyEnv } from "../../config/proxy-env.js";
 import type { CodexEvent } from "../../domain/types.js";
 import { AsyncEventQueue } from "./async-event-queue.js";
 import { AppServerWsConnection } from "./app-server-ws-connection.js";
@@ -377,6 +378,7 @@ export class CodexAppServerWorker implements CodexWorker {
     );
 
     this.child = spawn(this.env.CODEX_APP_SERVER_COMMAND, args, {
+      env: codexProxyEnv(),
       stdio: "pipe"
     });
 

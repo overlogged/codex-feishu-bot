@@ -234,6 +234,11 @@ pnpm bootstrap:env
 
 `.env.real.example` 里对每一项都有注释。
 
+代理使用 `CODEX_PROXY_URL`（例如 `http://127.0.0.1:7891`），只传给 Codex
+app-server 和 codex-auth 子进程。机器人启动时清除继承的通用代理变量，飞书、Kimi、
+Pi 和 dsh 默认直连；到本机 Codex app-server 的 WebSocket 也直连。
+如需确保飞书长连接直连，设置 `FEISHU_WS_PROXY_DISABLED=true`。
+
 ## 飞书目标状态
 
 Codex 在飞书开放平台里最终应达到这个状态：

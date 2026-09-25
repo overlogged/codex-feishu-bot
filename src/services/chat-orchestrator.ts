@@ -37,6 +37,7 @@ import {
   type SessionResumeCliCommands
 } from "./session-resume-command.js";
 import { UsageStatsService } from "./usage-stats-service.js";
+import { CodexAuthService } from "./codex-auth-service.js";
 import { formatTimeOfDay, parseTimeOfDay } from "./token-daily-report-service.js";
 
 interface LoggerLike {
@@ -52,6 +53,33 @@ const SCHEDULE_COMMAND = /^(定时任务|schedule|schedules)(?:\s+(.+))?$/i;
 const NEW_SESSION_COMMAND = /^(新会话|new\s+session|reset\s+session)$/i;
 const TOOL_CARDS_COMMAND = /^(工具卡片|tool\s*cards?)(?:\s+(开|开启|on|关|关闭|off|状态|status))?$/i;
 const QUOTA_COMMAND = /^(额度|余量|用量|token|tokens|usage|quota|stats)$/i;
+const AUTH_LIST_COMMAND = /^(账号|账号列表|codex\s*账号|auth|accounts?)$/i;
+const AUTH_SWITCH_COMMAND =
+  /^(?:切账号|切换账号|换账号|auth\s+switch|switch\s+account)\s+(\S+)\s*$/i;
+
+export type AuthCommand = { action: "list" } | { action: "switch"; query: string };
+
+/**
+ * 只识别「整句就是账号指令」的消息。切换会影响全局 Codex 账号，
+ * 只允许私聊执行（群里的switch指令只提示，不执行）。
+ */
+export function parseAuthCommand(message: IncomingChatMessage): AuthCommand | undefined {
+  const text = stripMentions(message.text).trim();
+  if (!text || text.length > 60) {
+    return undefined;
+  }
+
+  const switchMatched = text.match(AUTH_SWITCH_COMMAND);
+  if (switchMatched) {
+    return { action: "switch", query: switchMatched[1] ?? "" };
+  }
+
+  if (AUTH_LIST_COMMAND.test(text)) {
+    return { action: "list" };
+  }
+
+  return undefined;
+}
 
 type ToolCardsCommandAction = "on" | "off" | "status";
 
@@ -672,7 +700,8 @@ export class ChatOrchestrator {
     },
     private readonly resumeCliCommands: SessionResumeCliCommands = {},
     private readonly usageStatsService?: UsageStatsService,
-    private readonly tokenDailyReportDefaultTime = "23:00"
+    private readonly tokenDailyReportDefaultTime = "23:00",
+    private readonly codexAuthService?: CodexAuthService
   ) {}
 
   enqueue(message: IncomingChatMessage): void {
@@ -1412,6 +1441,15 @@ export class ChatOrchestrator {
       return true;
     }
 
+    const authCommand =
+      this.codexAuthService && (message.chatType !== "group" || message.mentionsBot)
+        ? parseAuthCommand(message)
+        : undefined;
+    if (authCommand) {
+      await this.handleAuthCommand(message, authCommand);
+      return true;
+    }
+
     const tokenReportCommand =
       message.chatType !== "group" || message.mentionsBot
         ? parseTokenDailyReportCommand(message)
@@ -1595,6 +1633,57 @@ export class ChatOrchestrator {
     await this.sendTextNotice(message.chatId, report, {
       messageId: message.messageId,
       context: "发送额度用量统计失败",
+      ...buildControlReplyMetadata(message)
+    });
+  }
+
+  private async handleAuthCommand(
+    message: IncomingChatMessage,
+    command: AuthCommand
+  ): Promise<void> {
+    if (!this.codexAuthService) {
+      return;
+    }
+
+    // 切换账号影响全局 Codex 会话，群里只提示，必须私聊执行。
+    if (command.action === "switch" && message.chatType === "group") {
+      await this.sendTextNotice(
+        message.chatId,
+        "切换 Codex 账号会影响所有会话，请私聊我发送“切账号 <邮箱或关键词>”。",
+        {
+          messageId: message.messageId,
+          context: "发送切账号提示失败",
+          ...buildControlReplyMetadata(message)
+        }
+      );
+      return;
+    }
+
+    let content: string;
+    try {
+      content =
+        command.action === "list"
+          ? await this.codexAuthService.buildAccountsReport()
+          : await this.codexAuthService.switchAccount(command.query);
+    } catch (error) {
+      this.logger.error(
+        {
+          chatId: message.chatId,
+          messageId: message.messageId,
+          action: command.action,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "处理账号指令失败"
+      );
+      content =
+        command.action === "list"
+          ? "账号列表暂时生成失败，请稍后再试。"
+          : "切换账号失败，请查看机器人日志。";
+    }
+
+    await this.sendTextNotice(message.chatId, content, {
+      messageId: message.messageId,
+      context: "发送账号指令回复失败",
       ...buildControlReplyMetadata(message)
     });
   }

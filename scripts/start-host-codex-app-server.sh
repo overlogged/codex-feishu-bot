@@ -27,6 +27,14 @@ if [ -f "${ENV_FILE}" ]; then
   set +a
 fi
 
+# Only the Codex process receives the outbound proxy.
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+if [ -n "${CODEX_PROXY_URL:-}" ]; then
+  export http_proxy="${CODEX_PROXY_URL}" https_proxy="${CODEX_PROXY_URL}"
+  export HTTP_PROXY="${CODEX_PROXY_URL}" HTTPS_PROXY="${CODEX_PROXY_URL}"
+  export no_proxy="localhost,127.0.0.1,::1" NO_PROXY="localhost,127.0.0.1,::1"
+fi
+
 LISTEN_URL="${CODEX_APP_SERVER_LISTEN_URL:-ws://127.0.0.1:4500}"
 WS_TOKEN_FILE="${CODEX_APP_SERVER_WS_TOKEN_FILE:-}"
 

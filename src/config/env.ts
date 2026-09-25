@@ -4,6 +4,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 
+import { clearProxyEnv } from "./proxy-env.js";
+
 loadDotenv({
   path: ".env"
 });
@@ -11,6 +13,9 @@ loadDotenv({
   path: ".env.real",
   override: true
 });
+
+// The bot and its non-Codex children always use direct connections.
+clearProxyEnv(process.env);
 
 const envBoolean = (defaultValue: boolean) =>
   z.preprocess((value) => {
@@ -85,6 +90,12 @@ const envSchema = z.object({
   PI_CLI_THINKING: optionalNonEmptyString.default("xhigh"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
   CCUSAGE_COMMAND: z.string().default("ccusage"),
+  /** codex-auth 多账号 CLI 命令。 */
+  CODEX_AUTH_COMMAND: z.string().default("codex-auth"),
+  /** codex-auth 的账号 registry，用于渲染账号列表与确认切换结果。 */
+  CODEX_AUTH_REGISTRY_FILE: z
+    .string()
+    .default(join(homedir(), ".codex", "accounts", "registry.json")),
   USAGE_CCUSAGE_CACHE_MS: z.coerce.number().int().positive().default(300000),
   USAGE_USD_TO_CNY_RATE: z.coerce.number().positive().default(7.2),
   USAGE_SNAPSHOT_FILE: z.string().default(".codex-feishu-bot/usage-snapshots.json"),
@@ -97,6 +108,16 @@ const envSchema = z.object({
   FEISHU_PROVIDER: z.enum(["sdk", "fake"]).default("sdk"),
   FEISHU_TRANSPORT: z.enum(["websocket", "webhook", "disabled"]).default("websocket"),
   FEISHU_DOMAIN: z.string().default("feishu"),
+  /** 飞书长连接看门狗：断开超过 FEISHU_WS_WATCHDOG_STALE_MS 时强制重建 WS 客户端。 */
+  FEISHU_WS_WATCHDOG_ENABLED: envBoolean(true),
+  FEISHU_WS_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  FEISHU_WS_WATCHDOG_STALE_MS: z.coerce.number().int().positive().default(180_000),
+  /** 长连接用的代理；留空则回退到 HTTPS_PROXY / HTTP_PROXY。 */
+  FEISHU_WS_PROXY_URL: optionalNonEmptyString,
+  /** 置 true 则长连接强制直连（忽略代理环境变量）。 */
+  FEISHU_WS_PROXY_DISABLED: envBoolean(false),
+  HTTP_PROXY: optionalNonEmptyString,
+  HTTPS_PROXY: optionalNonEmptyString,
   FEISHU_APP_ID: z.string().optional(),
   FEISHU_APP_SECRET: z.string().optional(),
   FEISHU_VERIFICATION_TOKEN: z.string().optional(),
@@ -125,6 +146,7 @@ export function readEnv(): Env {
     CODEX_ARTIFACTS_DIR: resolveDir(defaultWorkspace, parsed.CODEX_ARTIFACTS_DIR),
     RUNTIME_STATE_FILE: resolveDir(defaultWorkspace, parsed.RUNTIME_STATE_FILE),
     FEISHU_BRIDGE_SCRIPT: resolveDir(process.cwd(), parsed.FEISHU_BRIDGE_SCRIPT),
-    KIMI_CODE_CREDENTIALS_FILE: resolveDir(process.cwd(), parsed.KIMI_CODE_CREDENTIALS_FILE)
+    KIMI_CODE_CREDENTIALS_FILE: resolveDir(process.cwd(), parsed.KIMI_CODE_CREDENTIALS_FILE),
+    CODEX_AUTH_REGISTRY_FILE: resolveDir(process.cwd(), parsed.CODEX_AUTH_REGISTRY_FILE)
   };
 }

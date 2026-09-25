@@ -20,6 +20,7 @@ import { ChatOrchestrator, parseTokenDailyReportCommand } from "./chat-orchestra
 import type { GroupControlAgent, GroupControlIntent } from "./group-control-agent.js";
 import { MessageProjector } from "./message-projector.js";
 import { UsageStatsService } from "./usage-stats-service.js";
+import { CodexAuthService } from "./codex-auth-service.js";
 
 function createMessage(overrides: Partial<IncomingChatMessage> = {}): IncomingChatMessage {
   return {
@@ -3054,4 +3055,174 @@ test("ChatOrchestrator replies to @bot token in groups without invoking the cont
   assert.equal(sentTexts.length, 1);
   assert.match(sentTexts[0] ?? "", /额度与用量统计/);
   assertMentionedControlReply(sentTexts[0], "ou_user_1", "user-1");
+});
+
+function createCodexAuthService(options: {
+  onSwitch?: (query: string) => void;
+  failSwitch?: boolean;
+} = {}): CodexAuthService {
+  let activeKey = "key_a";
+  const registry = () =>
+    JSON.stringify({
+      schema_version: 3,
+      active_account_key: activeKey,
+      auto_switch: { enabled: true, threshold_5h_percent: 10, threshold_weekly_percent: 5 },
+      accounts: [
+        {
+          account_key: "key_a",
+          email: "alpha@example.com",
+          alias: "",
+          plan: "pro",
+          last_usage: {
+            primary: { used_percent: 12, window_minutes: 300, resets_at: null },
+            secondary: null,
+            plan_type: "pro"
+          }
+        },
+        {
+          account_key: "key_b",
+          email: "beta@example.com",
+          alias: "",
+          plan: "pro",
+          last_usage: {
+            primary: { used_percent: 0, window_minutes: 10080, resets_at: null },
+            secondary: null,
+            plan_type: "pro"
+          }
+        }
+      ]
+    });
+
+  return new CodexAuthService(
+    { command: "codex-auth", registryFile: "/registry.json" },
+    createLogger(),
+    async (_command, args) => {
+      if (args[0] === "switch") {
+        if (options.failSwitch) {
+          throw new Error("no account matches");
+        }
+        options.onSwitch?.(args[1] ?? "");
+        activeKey = "key_b";
+      }
+      return "";
+    },
+    async () => registry()
+  );
+}
+
+function createAuthOrchestrator(options: {
+  sentTexts: string[];
+  onRunTurn?: () => void;
+  onSwitch?: (query: string) => void;
+}): ChatOrchestrator {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+
+  return new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        options.sentTexts.push(input.content);
+        return "om_text_auth";
+      }
+    }),
+    createNoopDeliveryService(),
+    projector,
+    createQuotaCodexWorker(options.onRunTurn),
+    createWorkspaceResolver({}),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent(),
+    {},
+    createUsageStatsService(createQuotaCodexWorker()),
+    "23:00",
+    createCodexAuthService({ onSwitch: options.onSwitch })
+  );
+}
+
+test("ChatOrchestrator replies to the 账号 command with the codex-auth account report", async () => {
+  const sentTexts: string[] = [];
+  let runTurnCalls = 0;
+  const orchestrator = createAuthOrchestrator({
+    sentTexts,
+    onRunTurn: () => {
+      runTurnCalls += 1;
+    }
+  });
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_auth",
+      chatType: "p2p",
+      messageId: "om_auth_list_1",
+      text: "账号"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(runTurnCalls, 0);
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /Codex 账号（codex-auth）/);
+  assert.match(sentTexts[0] ?? "", /\* alpha@example\.com（Pro）/);
+  assert.match(sentTexts[0] ?? "", /beta@example\.com（Pro）/);
+  assert.match(sentTexts[0] ?? "", /自动切换：开启/);
+});
+
+test("ChatOrchestrator switches the codex account via 切账号 in private chats", async () => {
+  const sentTexts: string[] = [];
+  const switches: string[] = [];
+  const orchestrator = createAuthOrchestrator({
+    sentTexts,
+    onSwitch: (query) => {
+      switches.push(query);
+    }
+  });
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_p2p_auth",
+      chatType: "p2p",
+      messageId: "om_auth_switch_1",
+      text: "切账号 beta"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(switches, ["beta"]);
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /已切换到 Codex 账号 beta@example\.com（Pro）/);
+});
+
+test("ChatOrchestrator refuses 切账号 in groups and points to private chat", async () => {
+  const sentTexts: string[] = [];
+  const switches: string[] = [];
+  const orchestrator = createAuthOrchestrator({
+    sentTexts,
+    onSwitch: (query) => {
+      switches.push(query);
+    }
+  });
+
+  orchestrator.enqueue(
+    createMessage({
+      chatId: "oc_group_auth",
+      chatType: "group",
+      messageId: "om_auth_switch_group_1",
+      mentionsBot: true,
+      text: "@_user_1 切账号 beta"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(switches, []);
+  assert.equal(sentTexts.length, 1);
+  assert.match(sentTexts[0] ?? "", /请私聊我发送“切账号 <邮箱或关键词>”/);
 });
