@@ -127,7 +127,8 @@ pnpm host:smoke
 - `kimi`：启动 `kimi acp`（Agent Client Protocol，stdio JSON-RPC），按群复用长驻会话
 - `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；活跃 turn 内收到新消息会用 `abort` 打断当前 turn，再用最新消息立即重跑
 - `dsh`：启动 `dsh --profile acp`（DeepSeek Harness 的 ACP v1 stdio 协议），按群复用长驻会话；`ds` / `deepseek` 默认走这个后端，模型/provider 由 `~/.dsh/settings.yaml` 的 profile 配置决定。机器人每轮会显式设置 `session/set_config_option` 的 `reasoning_effort`（`DSH_ACP_REASONING`，默认 `high`）；不设置的话 dsh 默认不开启思考，中间过程不会输出
-- `claude`：仍为一次性 CLI 调用
+- `devin`：启动 `devin acp`，复用本机 Devin 登录和会话；支持过程输出、工具卡片及进程重启后的会话恢复。执行中追加消息按顺序排队，不中断当前任务。
+- `claude`：活跃任务使用 `--input-format stream-json` 持续接收输入，新消息通过原生 steer 注入同一个进程；任务结束后关闭输入，下一轮恢复会话。
 
 默认工作目录是 `/home/overlogged`。群聊只能绑定这个根目录下的一级子目录，不能直接把仓库根目录当运行工作区。
 
@@ -140,14 +141,16 @@ pnpm host:smoke
 - Codex 模型与思考深度（使用 Codex 时）
 
 所有会话都在宿主机裸机直接运行。
-Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-5.6-sol`，并显式指定 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`。
+Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-6.1-sol` 或 `gpt-5.6-sol`，并显式指定 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`。
 
 常见绑定方式：
 
 - 私聊机器人发 `工作区`
 - 回到群里发 `@机器人 12`
 - 或 `@机器人 claude 12`
+- 或 `@机器人 devin 12`
 - 或 `@机器人 codex GPT6 high 12`
+- 或 `@机器人 codex 6.1 Sol high 12`
 - 或 `@机器人 codex 5.6 Sol xhigh 12`
 - 或 `@机器人 kimi 12`
 - 或 `@机器人 pi 12`
@@ -155,12 +158,69 @@ Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-5.6-sol`，�
 - 或 `@机器人 ds 12`（`ds` / `deepseek` 默认绑定 dsh 后端）
 - 或自然语言，例如 `@机器人 把这个群切到 12 号目录`
 
+### 所有后端的模型与 provider 配置热加载
+
+统一配置文件为 `config/providers.json`，包含 `codex`、`claude`、`kimi`、`pi`、`dsh`、`devin` 六个已接入后端。编辑保存后，下次绑定、控制提示和新任务读取时生效，无需构建或重启机器人。使用 `CHAT_PROVIDER_CONFIG_FILE` 可指定其他路径（更改路径变量需要重启）。配置文件无法创建新的 CLI 协议适配器。
+
+每个 `backends.<cli>` 支持以下字段：
+
+| 字段 | 用途 |
+| --- | --- |
+| `aliases` | CLI 的别名，例如 `ds` 对应 dsh |
+| `models` | 模型列表，每项包含 `id`、`aliases` |
+| `providers` | 已在对应 CLI 中配置的 provider ID 和别名 |
+| `defaultModel` | 默认模型，必须引用本段 `models` 中的 ID |
+| `defaultProvider` | 默认供应商，必须引用本段 `providers`；Pi 支持，Kimi/DSH 取决于 ACP 能力 |
+| `defaultThinking` | 默认思考深度；Codex/Pi 支持，Kimi/DSH 取决于 ACP 能力；Claude/Devin 沿用原生行为 |
+| `nativeSettings` | 为 true 时使用 CLI 本机配置，不传 model/provider/thinking；Kimi/DSH 默认开启 |
+
+模型项还可设置 `provider`（固定路由）、`fallbackProvider`（没有指定供应商时的运行时兜底）、`providerModels`（Pi 的 provider → 实际模型 ID 映射）。例如，在 Pi 的 `providers` 中加入 `{"id":"my-gateway","aliases":["我的网关"]}`，并在 `models` 中加入：
+
+```json
+{
+  "id": "my-model",
+  "aliases": ["我的模型"],
+  "provider": "my-gateway",
+  "providerModels": { "my-gateway": "vendor/model-v2" }
+}
+```
+
+之后可用 `@机器人 pi 我的模型 12` 绑定。网关地址和密钥仍须配置在 Pi 原生配置中，这份文件只负责选择和映射。Codex 严格校验模型白名单；其他后端允许未列出的原生模型 ID 交给 CLI 校验。显式群绑定优先于配置默认值，配置默认值优先于 CLI 环境默认值。
+
+Claude 的 `providers` 配置用于 `切换 claude provider <别名>`，运行时会与 CC Switch 实际供应商列表核对，切换仍是全局操作。Claude/Codex/Devin 不支持通过群绑定指定 provider，因此不接受 `defaultProvider` 或模型项 provider 路由。Kimi/DSH 如需显式模型/provider 设置，先设 `nativeSettings: false`，再填写模型和默认值；执行时只会应用 ACP 会话实际提供的配置项，未支持的选项会明确报错。
+
+别名忽略大小写，空格和下划线按连字符匹配；同一命名空间中的不同项目不能共用别名。无效配置、缺失文件或未写完的 JSON 会保留上一份有效配置并记录警告，修复后自动恢复；启动时没有有效配置则报错。更新不会改写已保存的显式绑定或打断正在执行的任务；删除 Codex 模型前请先迁移使用它的群绑定。
+
+兼容旧环境变量 `CODEX_BINDING_MODELS_FILE`：显式设置时只覆盖 Codex 模型配置，原 `config/codex-models.json` 仅保留作为旧格式示例；未设置时 Codex 也从统一文件读取。
+
+## Devin
+
+先在宿主机完成 `devin auth login`，私聊机器人发送 `工作区` 获取目录编号，再在群里发送 `@机器人 devin 12`。后续普通消息使用本机 Devin 登录账号执行，默认沿用 Devin 的模型；`DEVIN_ACP_MODEL` 可指定新会话默认模型。群绑定显式指定模型时，优先于环境默认值；支持完整模型 ID（例如 `swe-2-high`）或名称（例如 `Claude Opus 5.5`）。运行时根据 Devin 实际模型列表匹配；未指定档位时优先沿用同模型当前档位，其次选 medium，不支持的名称会明确报错。
+
+`DEVIN_ACP_COMMAND` 默认 `devin`；服务 PATH 找不到时可设绝对路径。`DEVIN_PROXY_URL` 可为 Devin 子进程单独指定代理。无人值守任务使用 bypass 权限模式。任务执行中发来的消息会收到排队回执，依次续接会话；目前不支持原生 steer。可用群状态里的 `devin --resume <会话 ID>` 命令在本机恢复会话。
+
+## Claude 与 CC Switch
+
+群里发送 `@机器人 claude 12` 绑定 Claude 工作区（先私聊发送 `工作区` 获取编号）。后续普通消息调用宿主机 Claude Code，并自动续接会话。执行中会实时发送阶段说明；没有文字说明时显示精简工具状态，工具卡片仍由群设置控制。任务执行中再发普通消息，会通过 Claude 原生 steer 调整当前任务并收到回执，保持进程与会话；Claude 可能取消或重新安排当前工具步骤。若消息恰好到达任务收尾阶段，会等本轮结束再恢复会话处理。
+
+- `@机器人 provider` 或 `@机器人 列出 claude provider`：列出 CC Switch 的 Claude 供应商，标记当前项。
+- `@机器人 切换 claude provider ikuncode`：按完整 ID 或唯一名称切换；也支持自然语言向主控提出查看和切换请求。
+- 私聊也可使用以上 provider 命令，无需 @。
+
+切换使用 `cc-switch -a claude provider switch`，影响本机所有使用全局配置的 Claude 会话，后续任务生效；进行中的任务继续使用原配置。列表仅展示 ID、名称和当前标记，不展示密钥。Claude 默认模型来自供应商配置，群绑定显式指定模型时优先使用绑定模型。
+
+`CLAUDE_CLI_COMMAND` 默认 `claude`，`CC_SWITCH_COMMAND` 默认 `cc-switch`，服务 PATH 未包含它们时可配置绝对路径。如供应商需要代理，可设置独立的 `CLAUDE_PROXY_URL`，仅传给 Claude 子进程。Claude 任务默认绕过交互式权限询问，与宿主机无人值守运行方式一致。
+
 ## 额度与用量统计
 
 - 私聊机器人发 `额度` / `余量` / `用量` / `token` / `usage` / `quota` / `stats`，或在群里 `@机器人 额度`，即可同步查看额度与用量统计，不会启动任务
 - 群里也可以用自然语言问额度，例如 `@机器人 还剩多少额度`，由群控制 agent 的 `show_quota` 意图返回同一份报告
 - 报告包含 Codex 账号实时额度窗口、Kimi 账号实时额度（读取本机 kimi CLI 登录态，含 k3 等全部模型）、Codex 累计用量、**今日各 CLI 消耗**、**近 1 小时消耗（按用量快照估算）**，以及各 CLI 本月历史用量（后者依赖可选的全局命令 `npm install -g ccusage`，缺失时自动跳过；费用按 `USAGE_USD_TO_CNY_RATE` 折算为人民币）
 - 「近 1 小时消耗」依赖后台定期写入的用量快照（`USAGE_SNAPSHOT_FILE`，默认每 10 分钟一次），机器人启动约 1 小时后即可估算
+
+Devin 用量从本机 `~/.local/share/devin/cli/sessions.db` 只读统计（可通过 `DEVIN_USAGE_DATABASE` 改路径），按推理请求去重，包含输入、输出、缓存读取与缓存写入。统计覆盖本机所有 Devin 会话，不限当前群；今日、本月、近一小时快照及日报均包含 Devin。仅有本机落盘记录的调用才会计入。
+
+Devin 费用使用 `devin models list --format json` 返回的当前模型价格，每小时刷新，按 `USAGE_USD_TO_CNY_RATE` 折算人民币。目录明确标为 Free 的模型按 0 计算；未知模型或价格读取失败且无缓存时显示费用未知，合计会注明已知部分。Claude 缓存写入按 5 分钟缓存的 1.25 倍输入价估算（[Opus 5.5 官方价格](https://www.anthropic.com/claude-opus-5-5)）；CLI 未提供缓存时长，故不作为精确账单。历史用量也按当前价格估算，不等于 Devin Pro 的实际订阅扣费（[Devin 计费说明](https://docs.devin.ai/admin/billing/self-serve)）。读取 SQLite 需要支持 `node:sqlite` 的 Node 版本（当前宿主机为 Node 24）。
 
 ### 每日 token 消耗日报
 

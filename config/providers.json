@@ -1,0 +1,143 @@
+{
+  "backends": {
+    "codex": {
+      "aliases": [],
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "aliases": [
+            "6",
+            "GPT6",
+            "GPT-6",
+            "Astra",
+            "gpt6-astra"
+          ]
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "aliases": [
+            "6.1",
+            "6.1 Sol",
+            "6.1 Soul",
+            "gpt6.1",
+            "gpt-6.1",
+            "gpt6.1-sol",
+            "gpt6.1-soul",
+            "gpt-6.1-soul"
+          ]
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "aliases": [
+            "5.6",
+            "5.6 Sol",
+            "5.6 Soul",
+            "gpt5.6",
+            "gpt-5.6",
+            "gpt5.6-sol",
+            "gpt5.6-soul",
+            "gpt-5.6-soul"
+          ]
+        }
+      ],
+      "providers": [],
+      "defaultModel": "gpt-6-astra",
+      "defaultThinking": "high"
+    },
+    "claude": {
+      "aliases": [],
+      "models": [],
+      "providers": []
+    },
+    "kimi": {
+      "aliases": [],
+      "models": [],
+      "providers": [],
+      "nativeSettings": true
+    },
+    "pi": {
+      "aliases": [
+        "glm",
+        "openmodel"
+      ],
+      "models": [
+        {
+          "id": "glm-5.3-flash",
+          "aliases": [
+            "glm",
+            "GLM Flash",
+            "GLM 5.3 Flash",
+            "glm 5 3 flash",
+            "glm 53 flash",
+            "openmodel",
+            "open model"
+          ],
+          "provider": "openmodel"
+        },
+        {
+          "id": "deepseek-flash",
+          "aliases": [
+            "deepseek",
+            "ds",
+            "ds4",
+            "ds4.1",
+            "DeepSeek V4.1 Flash",
+            "ds4.1 flash",
+            "v4.1 flash",
+            "DeepSeek V4 Flash",
+            "ds4 flash",
+            "v4 flash",
+            "DeepSeek V4 Pro",
+            "ds4 pro",
+            "v4 pro",
+            "DeepSeek V4.1",
+            "DeepSeek V4",
+            "deepseek-v4.1-flash"
+          ],
+          "fallbackProvider": "openrouter",
+          "providerModels": {
+            "openmodel": "deepseek-v4.1-flash"
+          }
+        }
+      ],
+      "providers": [
+        {
+          "id": "openmodel",
+          "aliases": [
+            "open model"
+          ]
+        },
+        {
+          "id": "openrouter",
+          "aliases": []
+        },
+        {
+          "id": "deepseek",
+          "aliases": []
+        }
+      ]
+    },
+    "dsh": {
+      "aliases": [
+        "deepseek",
+        "ds",
+        "ds4",
+        "ds4.1",
+        "DeepSeek V4 Flash",
+        "DS4 Flash",
+        "DeepSeek V4.1 Flash",
+        "DS4.1 Flash",
+        "DeepSeek V4 Pro",
+        "DS4 Pro"
+      ],
+      "models": [],
+      "providers": [],
+      "nativeSettings": true
+    },
+    "devin": {
+      "aliases": [],
+      "models": [],
+      "providers": []
+    }
+  }
+}

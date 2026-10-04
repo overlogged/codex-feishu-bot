@@ -362,7 +362,7 @@ test("UsageStatsService renders today's consumption and estimates the last hour"
 
   const report = await service.buildReport();
 
-  assert.match(report, /【今日消耗（ccusage，自然日）】/);
+  assert.match(report, /【今日消耗（本机 CLI，自然日）】/);
   assert.match(report, /Codex：100\.0 万 token，估算费用 ¥7\.20/);
   assert.match(report, /· gpt-test：100\.0 万 token（¥4\.32）/);
   assert.match(report, /· gpt-test-mini：40\.0 万 token（¥2\.88）/);
@@ -422,4 +422,38 @@ test("formatTokenCount renders 亿/万 units", () => {
   assert.equal(formatTokenCount(3_300_000), "330.0 万");
   assert.equal(formatTokenCount(999), "999");
   assert.equal(formatTokenCount(null), "未知");
+});
+
+test("UsageStatsService includes Devin in daily/monthly reports and keeps unknown costs explicit", async () => {
+  const now = new Date();
+  const date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+  const service = new UsageStatsService(createWorker(), {ccusageCommand:"ccusage",cacheMs:1000,usdToCnyRate:7},
+    undefined, async (_cmd, args) => {
+      assert.notEqual(args[0], "devin", "Devin must not be sent to ccusage");
+      return JSON.stringify({daily:[],monthly:[]});
+    }, undefined, undefined, { async readDaily() { return [{date,totalTokens:8200,totalCost:0.0286,
+      topModels:[{modelName:"claude-opus-5-5-medium",totalTokens:8200,cost:0.0286}]}]; } });
+  const daily = await service.buildDailyReport();
+  assert.match(daily, /Devin：8200 token，估算费用 ¥0.20/);
+  assert.match(daily, /合计：8200 token，估算费用 ¥0.20/);
+  assert.match(daily, /不代表 Devin 订阅实际扣费/);
+  const report = await service.buildReport();
+  assert.match(report, new RegExp(`Devin（${date.slice(0,7)}）：8200 token，估算费用 ¥0.20`));
+});
+
+test("Devin joins hourly snapshots and unknown costs do not appear as free", async () => {
+  const date = new Date();
+  const day = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+  const store = new UsageSnapshotStore();
+  // The existing estimator intentionally does not bridge midnight.
+  if (date.getHours() > 0) await store.record({ at:new Date(Date.now()-3600000).toISOString(), totals:{devin:{tokens:100,cost:1}} });
+  const service = new UsageStatsService(createWorker(), {ccusageCommand:"ccusage",cacheMs:1000,usdToCnyRate:7},
+    undefined, async () => JSON.stringify({ daily:[],monthly:[] }), undefined, store,
+    { async readDaily() { return [{date:day,totalTokens:1000,totalCost:null,topModels:[{modelName:"unknown",totalTokens:1000,cost:null}]}]; } });
+  const report = await service.buildReport();
+  assert.match(report,/Devin：1000 token，费用未知/);
+  assert.match(report,/合计：1000 token，费用未知/);
+  if (date.getHours() > 0) assert.match(report,/Devin：900 token/);
+  assert.equal(store.list().at(-1)?.totals.devin?.tokens,1000);
+  assert.equal(store.list().at(-1)?.totals.devin?.cost,null);
 });

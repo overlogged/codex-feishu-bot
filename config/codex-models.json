@@ -1,0 +1,42 @@
+{
+  "defaultModel": "gpt-6-astra",
+  "defaultThinking": "high",
+  "models": [
+    {
+      "id": "gpt-6-astra",
+      "aliases": [
+        "6",
+        "GPT6",
+        "GPT-6",
+        "Astra",
+        "gpt6-astra"
+      ]
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "aliases": [
+        "6.1",
+        "6.1 Sol",
+        "6.1 Soul",
+        "gpt6.1",
+        "gpt-6.1",
+        "gpt6.1-sol",
+        "gpt6.1-soul",
+        "gpt-6.1-soul"
+      ]
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "aliases": [
+        "5.6",
+        "5.6 Sol",
+        "5.6 Soul",
+        "gpt5.6",
+        "gpt-5.6",
+        "gpt5.6-sol",
+        "gpt5.6-soul",
+        "gpt-5.6-soul"
+      ]
+    }
+  ]
+}

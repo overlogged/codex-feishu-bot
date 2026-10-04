@@ -315,6 +315,37 @@ test("FileBackedChatWorkspaceResolver binds Codex 5.6 Sol with an explicit think
   assert.equal(persistedBindings.oc_group_1?.thinking, "xhigh");
 });
 
+test("FileBackedChatWorkspaceResolver binds Codex 6.1 Sol with an explicit thinking depth", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(join(workspaceRoot, "Quant"), { recursive: true });
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.bindGroupWorkspace({
+    chatId: "oc_group_1",
+    cli: "codex",
+    code: "1",
+    model: "6.1 Soul",
+    thinking: "xhigh"
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error("expected Codex binding to succeed");
+  }
+  assert.equal(result.model, "gpt-6.1-sol");
+  assert.equal(result.thinking, "xhigh");
+
+  const persistedBindings = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
+    string,
+    { model: string; thinking: string }
+  >;
+  assert.equal(persistedBindings.oc_group_1?.model, "gpt-6.1-sol");
+  assert.equal(persistedBindings.oc_group_1?.thinking, "xhigh");
+});
+
 test("FileBackedChatWorkspaceResolver keeps openmodel for a deepseek model binding", async () => {
   const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
   const workspaceRoot = join(root, "workspace");
@@ -459,3 +490,37 @@ test("FileBackedChatWorkspaceResolver supports pi in host mode", async () => {
 
 
 
+
+test("FileBackedChatWorkspaceResolver supports devin in host mode", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
+  const workspaceRoot = join(root, "workspace");
+  const actualWorkspace = join(workspaceRoot, "Quant");
+  const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
+
+  await mkdir(actualWorkspace, { recursive: true });
+  await mkdir(join(workspaceRoot, ".codex-feishu-bot"), { recursive: true });
+  await writeFile(
+    configFilePath,
+    JSON.stringify({
+      oc_group_1: {
+        workspace: "Quant",
+        cli: "devin",
+      }
+    }),
+    "utf8"
+  );
+
+  const resolver = new FileBackedChatWorkspaceResolver(workspaceRoot, configFilePath);
+  const result = await resolver.resolve({
+    message: createMessage()
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    workspaceId: actualWorkspace,
+    cli: "devin",
+    provider: undefined,
+    model: undefined,
+    thinking: undefined
+  });
+});

@@ -225,8 +225,49 @@ function splitLongBlock(block: string, maxCharsPerChunk: number): string[] {
   return chunks.length > 0 ? chunks : [block];
 }
 
+/** Rewrite Claude's terminal-style Insight decorations for Feishu Markdown. */
+function normalizeInsightBlocks(content: string): string {
+  const lines: string[] = [];
+  let insideInsight = false;
+  let fence: { char: string; length: number } | undefined;
+
+  for (const line of content.split(/\r?\n/)) {
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      lines.push(line);
+      if (fenceMatch && fenceMatch[1]![0] === fence.char &&
+          fenceMatch[1]!.length >= fence.length && !fenceMatch[2]!.trim()) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (fenceMatch) {
+      fence = { char: fenceMatch[1]![0]!, length: fenceMatch[1]!.length };
+      lines.push(line);
+      continue;
+    }
+    // Leave indented code untouched as well as fenced code.
+    if (/^(?: {4}|\t)/.test(line)) {
+      lines.push(line);
+      continue;
+    }
+    const decoration = line.trim().replace(/^[*`_]+|[*`_]+$/g, "").trim();
+    if (/^(?:★\s*)?Insight\s*[─━—-]{3,}$/i.test(decoration)) {
+      if (lines.length && lines.at(-1)?.trim()) lines.push("");
+      lines.push("**💡 要点说明**", "");
+      insideInsight = true;
+    } else if (insideInsight && /^[─━—-]{5,}$/.test(decoration)) {
+      lines.push("");
+      insideInsight = false;
+    } else {
+      lines.push(line);
+    }
+  }
+  return lines.join("\n").trim();
+}
+
 export function normalizeAssistantBody(item: Pick<ConversationItem, "content" | "source">): string {
-  let body = item.content?.trim() || "处理中...";
+  let body = normalizeInsightBlocks(item.content?.trim() || "处理中...");
   if (item.source === "final_answer") {
     body = stripLeadingProcessParagraph(body);
     body = stripLeadingLabel(body, ["最终结论", "结论", "Final Answer"]);

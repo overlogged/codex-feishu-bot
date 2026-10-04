@@ -1,3 +1,4 @@
+import { applyAcpBindingSettings } from "./acp-binding-settings.js";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
@@ -497,6 +498,7 @@ export class KimiAcpSession {
   private closed = false;
   private activePrompt?: Promise<{ stopReason?: string }>;
   sessionId?: string;
+  configOptions: unknown[] = [];
 
   private readonly child: KimiAcpChild;
 
@@ -504,7 +506,12 @@ export class KimiAcpSession {
     private readonly handle: KimiAcpProcessHandle,
     private readonly workspaceId: string,
     private readonly logger?: LoggerLike,
-    private readonly label = "Kimi ACP"
+    private readonly label = "Kimi ACP",
+    private readonly options: {
+      resumeMethod?: "session/resume" | "session/load";
+      strictResume?: boolean;
+      requestTimeoutMs?: number;
+    } = {}
   ) {
     const child = handle.child;
     this.child = child;
@@ -520,6 +527,15 @@ export class KimiAcpSession {
           `${this.label} 进程 stderr`
         );
       }
+    });
+    child.once("error", (error) => {
+      this.closed = true;
+      for (const pending of this.pending.values()) pending.reject(error);
+      this.pending.clear();
+    });
+    child.stdin.on("error", (error) => {
+      for (const pending of this.pending.values()) pending.reject(error);
+      this.pending.clear();
     });
     child.once("close", (code, signal) => {
       this.closed = true;
@@ -554,7 +570,7 @@ export class KimiAcpSession {
 
     if (threadId && !threadId.startsWith("pending:")) {
       try {
-        await this.request("session/resume", {
+        await this.request(this.options.resumeMethod ?? "session/resume", {
           sessionId: threadId,
           cwd: this.workspaceId,
           mcpServers: []
@@ -562,6 +578,7 @@ export class KimiAcpSession {
         this.sessionId = threadId;
         return threadId;
       } catch (error) {
+        if (this.options.strictResume) throw error;
         this.logger?.warn(
           {
             workspaceId: this.workspaceId,
@@ -675,10 +692,18 @@ export class KimiAcpSession {
     }
 
     const id = this.nextRequestId++;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
+      if (this.options.requestTimeoutMs && method !== "session/prompt") {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`${this.label} ${method} 请求超时。`));
+        }, this.options.requestTimeoutMs);
+        timer.unref();
+      }
       this.write({ jsonrpc: "2.0", id, method, params });
-    });
+    }).finally(() => { if (timer) clearTimeout(timer); });
   }
 
   private notify(method: string, params: unknown): void {
@@ -728,6 +753,9 @@ export class KimiAcpSession {
           typeof message.error.message === "string" ? message.error.message : JSON.stringify(message.error);
         pending.reject(new Error(errorMessage));
       } else {
+        if (isRecord(message.result) && Array.isArray(message.result.configOptions)) {
+          this.configOptions = message.result.configOptions;
+        }
         pending.resolve(message.result);
       }
       return;
@@ -737,6 +765,7 @@ export class KimiAcpSession {
       const params = isRecord(message.params) ? message.params : undefined;
       const update = isRecord(params?.update) ? params.update : undefined;
       if (update) {
+        if (Array.isArray(update.configOptions)) this.configOptions = update.configOptions;
         this.updateHandler?.(update);
       }
       return;
@@ -869,6 +898,8 @@ export class KimiAcpWorker implements CodexWorker {
       kind: "thread_bound",
       threadId: sessionId
     };
+
+    await applyAcpBindingSettings(session, { provider: context.provider, model: context.model, thinking: context.thinking });
 
     const eventQueue = new AsyncEventQueue<CodexEvent>();
     const projector = new KimiAcpTurnProjector(turnId);

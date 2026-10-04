@@ -19,6 +19,7 @@ function buildSession(overrides: Partial<ChatSession> = {}): ChatSession {
 }
 
 test("buildSessionResumeCommand renders per-CLI resume commands", () => {
+  assert.equal(buildSessionResumeCommand("devin", "painted-gasosaurus", "/home/user/work"), "cd /home/user/work && devin --resume painted-gasosaurus");
   assert.equal(
     buildSessionResumeCommand("codex", "abc", "/home/user/work"),
     "cd /home/user/work && codex resume abc"

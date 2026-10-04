@@ -1,3 +1,4 @@
+import { resolveConfiguredSelection } from "../../services/provider-catalog.js";
 import type { ChatCli } from "../../domain/types.js";
 import type {
   CodexAccountUsage,
@@ -28,7 +29,7 @@ export class MultiCliWorker implements CodexWorker {
   }
 
   ensureThread(context: CodexTurnContext): Promise<string> {
-    return this.workers[context.cli].ensureThread(context);
+    return this.workers[context.cli].ensureThread(this.withDefaults(context));
   }
 
   steerTurn(context: CodexTurnContext & { threadId: string; turnId: string }): Promise<void> {
@@ -72,7 +73,12 @@ export class MultiCliWorker implements CodexWorker {
   }
 
   async *runTurn(context: CodexTurnContext & { threadId: string }) {
-    yield* this.workers[context.cli].runTurn(context);
+    yield* this.workers[context.cli].runTurn(this.withDefaults(context));
+  }
+
+  private withDefaults<T extends CodexTurnContext>(context: T): T {
+    if (context.cli === "codex") return context;
+    return { ...context, ...resolveConfiguredSelection(context.cli, context) };
   }
 
   readRateLimits(): Promise<CodexRateLimits | null> {

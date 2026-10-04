@@ -1,3 +1,4 @@
+import { ClaudeProviderService } from "./claude-provider-service.js";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -427,7 +428,8 @@ test("ChatOrchestrator accepts group messages without mentions", async () => {
   assert.equal(conversationStore.list()[0]?.content, "收到");
 });
 
-test("ChatOrchestrator steers into the active turn instead of creating a new queued run", async () => {
+for (const cli of ["codex", "claude"] as const) {
+test(`ChatOrchestrator steers into the active ${cli} turn instead of creating a new queued run`, async () => {
   const sessionStore = new SessionStore();
   const runStore = new RunStore();
   const conversationStore = new ConversationStore();
@@ -440,7 +442,7 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
   sessionStore.save({
     chatId: "oc_group_1",
     threadId: "thread_active_1",
-    cli: "codex",
+    cli,
     workspaceId: "/workspace",
     activeRunId: existingRun.runId,
     activeTurnId: "turn_active_1",
@@ -455,6 +457,8 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
   });
 
   const codexWorker: CodexWorker = {
+    supportsSteer() { return true; },
+    async interruptTurn() { assert.fail("steer must not interrupt the worker"); },
     async ensureThread() {
       return "thread_active_1";
     },
@@ -506,6 +510,8 @@ test("ChatOrchestrator steers into the active turn instead of creating a new que
   assert.equal(runStore.list().length, 1);
   assert.equal(runStore.list()[0]?.sourceMessageId, "om_group_steer_1");
 });
+
+}
 
 test("ChatOrchestrator acknowledges a steered message while a long turn is still running", async () => {
   const sessionStore = new SessionStore();
@@ -1672,7 +1678,7 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi" | "dsh";
+        cli: "codex" | "claude" | "kimi" | "pi" | "dsh" | "devin";
         code: string;
       }
     | undefined;
@@ -1749,6 +1755,98 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
     thinking: undefined
   });
   assert.match(sentTexts[0] ?? "", /Claude CLI/);
+});
+
+
+
+test("ChatOrchestrator binds group workspace with the full Codex 6.1 Sol model ID", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+  let bindInput:
+    | {
+        chatId: string;
+        cli: "codex" | "claude" | "kimi" | "pi" | "dsh" | "devin";
+        code: string;
+      }
+    | undefined;
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_group_bound_claude";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    {
+      async ensureThread() {
+        return "thread_should_not_start";
+      },
+      async *runTurn(): AsyncGenerator<CodexEvent> {}
+    },
+    createWorkspaceResolver({
+      async bindGroupWorkspace(input) {
+        bindInput = input;
+        return {
+          ok: true,
+          cli: "codex",
+          entry: {
+            code: "12",
+            workspace: "Quant/project-a",
+            workspaceId: "/home/overlogged/Quant/project-a"
+          },
+          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
+        };
+      }
+    }),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret() {
+        return createControlResult({
+          kind: "bind_workspace",
+          cli: "codex",
+          model: "gpt-6.1-sol",
+          thinking: "xhigh",
+          code: "12"
+        });
+      }
+    })
+  );
+
+  orchestrator.enqueue(
+    createControlSession({
+      messageId: "om_group_bind_claude_1",
+      text: "@托帕 codex gpt-6.1-sol xhigh 12"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(bindInput, {
+    chatId: "oc_group_1",
+    cli: "codex",
+    code: "12",
+    provider: undefined,
+    model: "gpt-6.1-sol",
+    thinking: "xhigh"
+  });
+  assert.match(sentTexts[0] ?? "", /Codex CLI/);
 });
 
 
@@ -3112,6 +3210,8 @@ function createCodexAuthService(options: {
 
 function createAuthOrchestrator(options: {
   sentTexts: string[];
+  controlAgent?: GroupControlAgent;
+  claudeProviderService?: ClaudeProviderService;
   onRunTurn?: () => void;
   onSwitch?: (query: string) => void;
 }): ChatOrchestrator {
@@ -3137,11 +3237,12 @@ function createAuthOrchestrator(options: {
     createScheduleService(),
     "/home/overlogged",
     createLogger(),
-    createGroupControlAgent(),
+    options.controlAgent ?? createGroupControlAgent(),
     {},
     createUsageStatsService(createQuotaCodexWorker()),
     "23:00",
-    createCodexAuthService({ onSwitch: options.onSwitch })
+    createCodexAuthService({ onSwitch: options.onSwitch }),
+    options.claudeProviderService
   );
 }
 
@@ -3225,4 +3326,257 @@ test("ChatOrchestrator refuses 切账号 in groups and points to private chat", 
   assert.deepEqual(switches, []);
   assert.equal(sentTexts.length, 1);
   assert.match(sentTexts[0] ?? "", /请私聊我发送“切账号 <邮箱或关键词>”/);
+});
+
+for (const text of ["@托帕 provider", "@托帕 切换 claude provider ikuncode"]) {
+  test(`ChatOrchestrator handles Claude provider control without running a worker: ${text}`, async () => {
+    const sentTexts: string[] = [];
+    let runs = 0;
+    let switches = 0;
+    const service = new ClaudeProviderService("cc-switch", async (_, args) => {
+      if (args[3] === "switch") switches++;
+      return "│   ┆ ID ┆ Name ┆ API URL │\n│ ✓ ┆ ikuncode ┆ ikuncode ┆ N/A │";
+    });
+    const orchestrator = createAuthOrchestrator({ sentTexts, onRunTurn: () => { runs++; }, claudeProviderService: service });
+    orchestrator.enqueue(createMessage({ text, mentionsBot: true }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(runs, 0);
+    assert.equal(sentTexts.length, 1);
+    assert.match(sentTexts[0]!, /ikuncode/);
+    assert.equal(switches, text.includes("切换") ? 1 : 0);
+  });
+}
+
+test("natural language group provider intents execute without a project task", async () => {
+  const sentTexts: string[] = [];
+  let runs = 0;
+  let switched = false;
+  const service = new ClaudeProviderService("cc-switch", async (_, args) => {
+    if (args[3] === "switch") switched = true;
+    return "│   ┆ ID ┆ Name ┆ API URL │\n│ ✓ ┆ ikuncode ┆ ikuncode ┆ N/A │";
+  });
+  const orchestrator = createAuthOrchestrator({ sentTexts, onRunTurn: () => { runs++; }, claudeProviderService: service,
+    controlAgent: createGroupControlAgent({ async interpret() {
+      return createControlResult([{ kind: "list_claude_providers" }, { kind: "switch_claude_provider", provider: "ikuncode" }]);
+    } })
+  });
+  orchestrator.enqueue(createMessage({ text: "@托帕 帮我看看有哪些供应商，然后改成 ikuncode", mentionsBot: true }));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runs, 0);
+  assert.equal(switched, true);
+  assert.ok(sentTexts.some((text) => text.includes("已切换")));
+});
+test("ChatOrchestrator waits for Claude cleanup when steer races final result", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const existingRun = runStore.create({
+    chatId: "oc_group_1",
+    threadId: "thread_active_1",
+    sourceMessageId: "om_original_1"
+  });
+  sessionStore.save({
+    chatId: "oc_group_1",
+    threadId: "thread_active_1",
+    cli: "claude",
+    workspaceId: "/workspace",
+    activeRunId: existingRun.runId,
+    activeTurnId: "turn_active_1",
+    updatedAt: new Date().toISOString()
+  });
+
+  let steerCalls = 0;
+  let runTurnCalls = 0;
+  let resolveSteer: (() => void) | undefined;
+  const steerCompleted = new Promise<void>((resolve) => {
+    resolveSteer = resolve;
+  });
+
+  const codexWorker: CodexWorker = {
+    supportsSteer() { return true; },
+    async interruptTurn() { assert.fail("steer must not interrupt the worker"); },
+    async ensureThread() {
+      return "thread_active_1";
+    },
+    async steerTurn(context) {
+      steerCalls += 1;
+      assert.equal(context.threadId, "thread_active_1");
+      assert.equal(context.turnId, "turn_active_1");
+      assert.equal(context.message.messageId, "om_group_steer_1");
+      resolveSteer?.();
+      throw Object.assign(new Error("finishing"), { code: "CLAUDE_TURN_FINISHED" });
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      runTurnCalls += 1;
+    }
+  };
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient(),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    codexWorker,
+    createWorkspaceResolver(),
+    createScheduleService(),
+    "/workspace",
+    createLogger()
+  );
+
+  orchestrator.enqueue(
+    createMessage({
+      messageId: "om_group_steer_1",
+      text: "这条应该直接补充给正在运行的 turn"
+    })
+  );
+
+  await steerCompleted;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runTurnCalls, 0);
+  assert.equal(sessionStore.get("oc_group_1")?.activeRunId, existingRun.runId);
+  sessionStore.releaseRun("oc_group_1", existingRun.runId);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.equal(steerCalls, 1);
+  assert.equal(runTurnCalls, 1);
+  assert.equal(runStore.list().length, 2);
+  assert.equal(runStore.list()[0]?.sourceMessageId, "om_group_steer_1");
+});
+
+test("Devin messages wait in arrival order without interrupting the active turn", async () => {
+  const sessions = new SessionStore();
+  const runs = new RunStore();
+  const conversations = new ConversationStore();
+  const started: string[] = [];
+  const notices: string[] = [];
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const worker: CodexWorker = {
+    supportsSteer() { return false; },
+    async ensureThread() { return "devin-session"; },
+    async interruptTurn() { assert.fail("queued messages must not interrupt"); },
+    async *runTurn(context) {
+      started.push(context.message.text);
+      yield { kind: "turn_bound", turnId: context.message.messageId };
+      if (context.message.text === "first") await firstGate;
+    }
+  };
+  const orchestrator = new ChatOrchestrator(sessions, runs, conversations,
+    createFeishuClient({ async sendText({ content }) { notices.push(content); return "notice"; } }),
+    { schedule() {}, async flushRun() {} } as never,
+    new MessageProjector(runs, conversations), worker,
+    createWorkspaceResolver({ async resolve() { return { ok: true, cli: "devin", workspaceId: "/workspace" }; } }),
+    createScheduleService(), "/workspace", createLogger());
+  const waitUntil = async (condition: () => boolean) => {
+    for (let i = 0; i < 100 && !condition(); i++) await new Promise(r => setTimeout(r, 10));
+    assert.ok(condition());
+  };
+  orchestrator.enqueue(createMessage({ messageId: "first", text: "first" }));
+  await waitUntil(() => started.length === 1);
+  orchestrator.enqueue(createMessage({ messageId: "second", text: "second" }));
+  orchestrator.enqueue(createMessage({ messageId: "third", text: "third" }));
+  try {
+    await waitUntil(() => notices.filter(t => t.includes("已排队")).length === 2);
+    assert.deepEqual(started, ["first"]);
+  } finally { releaseFirst(); }
+  await waitUntil(() => started.length === 3);
+  assert.deepEqual(started, ["first", "second", "third"]);
+});
+
+test("ChatOrchestrator binds group workspace with the Devin cli selector", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+  let bindInput:
+    | {
+        chatId: string;
+        cli: "codex" | "claude" | "kimi" | "pi" | "dsh" | "devin";
+        code: string;
+      }
+    | undefined;
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_group_bound_devin";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    {
+      async ensureThread() {
+        return "thread_should_not_start";
+      },
+      async *runTurn(): AsyncGenerator<CodexEvent> {}
+    },
+    createWorkspaceResolver({
+      async bindGroupWorkspace(input) {
+        bindInput = input;
+        return {
+          ok: true,
+          cli: "devin",
+          entry: {
+            code: "12",
+            workspace: "Quant/project-a",
+            workspaceId: "/home/overlogged/Quant/project-a"
+          },
+          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
+        };
+      }
+    }),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret() {
+        return createControlResult({
+          kind: "bind_workspace",
+          cli: "devin",
+          code: "12"
+        });
+      }
+    })
+  );
+
+  orchestrator.enqueue(
+    createControlSession({
+      messageId: "om_group_bind_devin_1",
+      text: "@托帕 devin 12"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(bindInput, {
+    chatId: "oc_group_1",
+    cli: "devin",
+    code: "12",
+    provider: undefined,
+    model: undefined,
+    thinking: undefined
+  });
+  assert.match(sentTexts[0] ?? "", /Devin/);
 });

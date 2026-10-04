@@ -1,3 +1,4 @@
+import { findConfiguredModel, getProviderCatalog, resolveConfiguredSelection } from "../../services/provider-catalog.js";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdir } from "node:fs/promises";
@@ -72,68 +73,9 @@ function truncateText(value: string, maxLength = 200): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;
 }
 
-function normalizeWhitespace(text: string): string {
-  return text.replace(/[\s_\-]+/g, " ").toLowerCase();
-}
-
-function includesWord(text: string, word: string): boolean {
-  return new RegExp(`(^|\\s)${word}(\\s|$)`).test(text);
-}
-
 export function selectPiModelFromMessage(text: string): PiModelSelection {
-  const normalized = normalizeWhitespace(text);
-
-  if (
-    normalized.includes("glm 5 3 flash") ||
-    normalized.includes("glm 5.3 flash") ||
-    normalized.includes("glm 53 flash") ||
-    normalized.includes("glm flash") ||
-    normalized.includes("openmodel") ||
-    normalized.includes("open model") ||
-    includesWord(normalized, "glm")
-  ) {
-    return { provider: "openmodel", model: "glm-5.3-flash" };
-  }
-
-  if (
-    normalized.includes("deepseek v4.1 flash") ||
-    normalized.includes("ds4.1 flash") ||
-    normalized.includes("v4.1 flash") ||
-    normalized.includes("deepseek v4 flash") ||
-    normalized.includes("ds4 flash") ||
-    normalized.includes("v4 flash")
-  ) {
-    return { model: PI_DS_FLASH_MODEL };
-  }
-
-  if (
-    normalized.includes("deepseek v4 pro") ||
-    normalized.includes("ds4 pro") ||
-    normalized.includes("v4 pro")
-  ) {
-    return { model: PI_DS_FLASH_MODEL };
-  }
-
-  if (
-    normalized.includes("deepseek v4.1") ||
-    normalized.includes("ds4.1") ||
-    normalized.includes("deepseek v4") ||
-    normalized.includes("deepseek") ||
-    normalized.includes("ds4") ||
-    includesWord(normalized, "ds")
-  ) {
-    return { model: PI_DS_FLASH_MODEL };
-  }
-
-  return {};
-}
-
-function canonicalizePiModel(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  return selectPiModelFromMessage(value).model ?? value;
+  const model = findConfiguredModel("pi", text, true);
+  return model ? { model: model.id, ...(model.provider ? { provider: model.provider } : {}) } : {};
 }
 
 function sanitizePathSegment(value: string): string {
@@ -180,56 +122,18 @@ interface PiResolvedSettings {
   thinking?: string;
 }
 
-/**
- * 同一个模型在不同 provider 上的 id 可能不同：
- * - deepseek 官方 provider 用 `deepseek-flash`
- * - openmodel 网关用 `deepseek-v4.1-flash`
- * 传错 id 会被上游以 404 拒绝，而且这类错误在 RPC 事件里没有正文，看起来就是“结果为空”。
- */
-function resolvePiProviderModelId(
-  provider: string | undefined,
-  model: string | undefined
-): string | undefined {
-  if (!model) {
-    return model;
-  }
-
-  if (model.startsWith("deepseek")) {
-    return provider === "openmodel" ? PI_DS_FLASH_OPENMODEL_MODEL : PI_DS_FLASH_MODEL;
-  }
-
-  return model;
-}
-
-/**
- * GLM 只存在于本机 pi 的 openmodel 自定义 provider 里，所以 glm 模型必须路由到
- * openmodel；其余情况尊重显式 provider / 环境默认值（openmodel 也能承载 ds flash）。
- */
-function resolvePiProvider(
-  explicitProvider: string | undefined,
-  model: string | undefined,
-  envProvider: string | undefined
-): string | undefined {
-  if (model?.startsWith("glm")) {
-    return "openmodel";
-  }
-
-  return explicitProvider ?? envProvider;
-}
-
 function resolvePiSettings(
   env: Pick<Env, "PI_CLI_PROVIDER" | "PI_CLI_MODEL" | "PI_CLI_THINKING">,
   context: CodexTurnContext
 ): PiResolvedSettings {
   const messageSelection = selectPiModelFromMessage(context.message.text);
-  const explicitProvider = messageSelection.provider ?? context.provider;
-  const requestedModel = canonicalizePiModel(
-    messageSelection.model ?? context.model ?? env.PI_CLI_MODEL
-  );
-  const provider = resolvePiProvider(explicitProvider, requestedModel, env.PI_CLI_PROVIDER);
-  const model = resolvePiProviderModelId(provider, requestedModel);
-  const thinking = messageSelection.thinking ?? context.thinking ?? env.PI_CLI_THINKING;
-
+  const defaults = getProviderCatalog().backends.pi;
+  const selection = resolveConfiguredSelection("pi", {
+    provider: messageSelection.provider ?? context.provider ?? defaults.defaultProvider ?? env.PI_CLI_PROVIDER,
+    model: messageSelection.model ?? context.model ?? defaults.defaultModel ?? env.PI_CLI_MODEL,
+    thinking: messageSelection.thinking ?? context.thinking ?? defaults.defaultThinking ?? env.PI_CLI_THINKING
+  }, true);
+  const { provider, model, thinking } = selection;
   return { provider, model, thinking };
 }
 
@@ -243,8 +147,9 @@ export function buildPiRpcArgs(
 
   if (settings.provider) {
     args.push("--provider", settings.provider);
-  } else if (settings.model?.startsWith("deepseek")) {
-    args.push("--provider", "openrouter");
+  } else {
+    const fallback = settings.model ? findConfiguredModel("pi", settings.model)?.fallbackProvider : undefined;
+    if (fallback) args.push("--provider", fallback);
   }
 
   if (settings.model) {

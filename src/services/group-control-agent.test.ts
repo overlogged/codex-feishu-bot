@@ -86,6 +86,7 @@ test("CodexGroupControlAgent interprets structured bind results from a fresh cod
   assert.match(lastPrompt, /多动作时返回/);
   assert.match(lastPrompt, /2: Quant/);
   assert.match(lastPrompt, /model=gpt-6-astra/);
+  assert.match(lastPrompt, /model=gpt-6\.1-sol/);
   assert.match(lastPrompt, /model=gpt-5\.6-sol/);
   assert.match(lastPrompt, /thinking 默认返回 high/);
 });
@@ -731,4 +732,75 @@ test("CodexGroupControlAgent falls back to a live summary when the old session f
   assert.match(capturedPrompt, /之前把这个群绑到了 Quant 的 2 号目录/);
   assert.equal(result.threadId, "pi_control_1");
   assert.equal(result.cli, "pi");
+});
+
+test("group controller parses Claude provider list and switch intents", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() { return "unused"; },
+    async *runTurn(context) {
+      assert.match(context.message.text, /list_claude_providers/);
+      yield { kind: "assistant_message_completed", itemId: "final", text: JSON.stringify({ actions: [
+        { kind: "list_claude_providers" },
+        { kind: "switch_claude_provider", provider: "ikuncode" }
+      ] }) };
+    }
+  };
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(createMessage({ text: "列出供应商再切换到 ikuncode" }), {
+    catalog: [], scheduledTasks: [], currentBinding: { configured: false, detail: "未绑定" }
+  });
+  assert.deepEqual(result.intents, [{ kind: "list_claude_providers" }, { kind: "switch_claude_provider", provider: "ikuncode" }]);
+});
+
+test("CodexGroupControlAgent interprets devin bind intent", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() {
+      return "thread_should_not_be_used";
+    },
+    async *runTurn(): AsyncGenerator<CodexEvent> {
+      yield {
+        kind: "assistant_message_completed",
+        itemId: "final_1",
+        text: '{"kind":"bind_workspace","cli":"devin","code":"2"}'
+      };
+    }
+  };
+
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
+  const result = await agent.interpret(
+    createMessage({
+      text: "@托帕 把这个群绑定到 devin 的 Quant"
+    }),
+    {
+      catalog: [
+        {
+          code: "1",
+          workspace: "Downloads",
+          workspaceId: "/home/overlogged/Downloads"
+        },
+        {
+          code: "2",
+          workspace: "Quant",
+          workspaceId: "/home/overlogged/Quant"
+        }
+      ],
+      scheduledTasks: [],
+      currentBinding: {
+        configured: false,
+        detail: "这个群还没有绑定工作区。"
+      }
+    }
+  );
+
+  assert.deepEqual(result.intents, [
+    {
+      kind: "bind_workspace",
+      cli: "devin",
+      code: "2",
+      provider: undefined,
+      model: undefined,
+      thinking: undefined
+    }
+  ]);
+  assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
 });

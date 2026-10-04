@@ -1,3 +1,4 @@
+import { applyAcpBindingSettings } from "./acp-binding-settings.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
@@ -56,7 +57,7 @@ interface ActiveDshTurn {
 /**
  * DeepSeek Harness 后端，通过官方 `dsh --profile acp` 暴露的 ACP v1 stdio 协议接入。
  * 复用 Kimi ACP 的 JSON-RPC 客户端与事件投影，只替换进程启动方式和会话标签。
- * 模型/ provider 由 dsh profile 的配置决定（当前是 openmodel / deepseek-v4.1-flash）。
+ * 默认沿用 dsh profile；统一配置关闭 nativeSettings 后可应用 ACP 支持的绑定选项。
  */
 export class DshAcpWorker implements CodexWorker {
   private readonly sessionsByChatId = new Map<string, KimiAcpSession>();
@@ -147,6 +148,8 @@ export class DshAcpWorker implements CodexWorker {
         );
       }
     }
+
+    await applyAcpBindingSettings(session, { provider: context.provider, model: context.model, thinking: context.thinking });
 
     const eventQueue = new AsyncEventQueue<CodexEvent>();
     const projector = new KimiAcpTurnProjector(turnId, DSH_LABEL);

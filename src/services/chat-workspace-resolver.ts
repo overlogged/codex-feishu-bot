@@ -1,3 +1,5 @@
+import { resolveConfiguredSelection } from "./provider-catalog.js";
+import { getCodexModelCatalog, normalizeCodexBindingModel } from "./codex-model-catalog.js";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
@@ -116,9 +118,6 @@ const SKIPPED_DIRECTORY_NAMES = new Set([
 
 const SUPPORTED_CHAT_CLIS = new Set<ChatCli>(CHAT_CLI_VALUES);
 
-export const DEFAULT_CODEX_BINDING_MODEL = "gpt-6-astra";
-export const DEFAULT_CODEX_BINDING_THINKING = "high";
-export const CODEX_BINDING_MODELS = ["gpt-6-astra", "gpt-5.6-sol"] as const;
 export const CODEX_BINDING_THINKING_LEVELS = [
   "low",
   "medium",
@@ -128,38 +127,9 @@ export const CODEX_BINDING_THINKING_LEVELS = [
   "ultra"
 ] as const;
 
-function normalizeCodexBindingModel(value: string | undefined): string | undefined {
-  if (!value?.trim()) {
-    return DEFAULT_CODEX_BINDING_MODEL;
-  }
-
-  const normalized = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
-  if (["6", "gpt6", "gpt-6", "gpt6-astra", "gpt-6-astra"].includes(normalized)) {
-    return "gpt-6-astra";
-  }
-
-  if (
-    [
-      "5.6",
-      "5.6-sol",
-      "5.6-soul",
-      "gpt5.6",
-      "gpt-5.6",
-      "gpt5.6-sol",
-      "gpt-5.6-sol",
-      "gpt5.6-soul",
-      "gpt-5.6-soul"
-    ].includes(normalized)
-  ) {
-    return "gpt-5.6-sol";
-  }
-
-  return undefined;
-}
-
 function normalizeCodexBindingThinking(value: string | undefined): string | undefined {
   if (!value?.trim()) {
-    return DEFAULT_CODEX_BINDING_THINKING;
+    return getCodexModelCatalog().defaultThinking;
   }
 
   const normalized = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
@@ -220,27 +190,6 @@ function resolveCodexBindingSettings(input: { model?: string; thinking?: string 
     model,
     thinking
   };
-}
-
-/**
- * GLM 只存在于 openmodel provider，绑定 glm 时必须落到 openmodel；
- * openmodel 同时也承载 deepseek-v4.1-flash，所以显式 provider 要保留，
- * 由运行时把模型 id 翻译成对应 provider 的 id。
- */
-function normalizePiBindingProvider(input: {
-  cli: ChatCli;
-  provider?: string;
-  model?: string;
-}): string | undefined {
-  if (input.cli !== "pi") {
-    return input.provider;
-  }
-
-  if (input.model?.startsWith("glm")) {
-    return "openmodel";
-  }
-
-  return input.provider;
 }
 
 function parseBindingWorkspace(
@@ -492,7 +441,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     if (codexSettings && !codexSettings.ok) {
       const supported =
         codexSettings.field === "model"
-          ? CODEX_BINDING_MODELS.join(" / ")
+          ? getCodexModelCatalog().models.map((model) => model.id).join(" / ")
           : CODEX_BINDING_THINKING_LEVELS.join(" / ");
       return {
         ok: false,
@@ -509,13 +458,11 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       ok: true,
       workspaceId: resolvedWorkspace,
       cli: configuredBinding.cli,
-      provider: normalizePiBindingProvider({
-        cli: configuredBinding.cli,
+      ...resolveConfiguredSelection(configuredBinding.cli, {
         provider: configuredBinding.provider,
-        model: codexSettings?.model ?? configuredBinding.model
-      }),
-      model: codexSettings?.model ?? configuredBinding.model,
-      thinking: codexSettings?.thinking ?? configuredBinding.thinking
+        model: codexSettings?.model ?? configuredBinding.model,
+        thinking: codexSettings?.thinking ?? configuredBinding.thinking
+      })
     };
   }
 
@@ -579,7 +526,7 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
     if (codexSettings && !codexSettings.ok) {
       const isModel = codexSettings.field === "model";
       const supported = isModel
-        ? CODEX_BINDING_MODELS.join(" / ")
+        ? getCodexModelCatalog().models.map((model) => model.id).join(" / ")
         : CODEX_BINDING_THINKING_LEVELS.join(" / ");
       return {
         ok: false,
@@ -589,13 +536,12 @@ export class FileBackedChatWorkspaceResolver implements ChatWorkspaceResolver {
       };
     }
 
-    const resolvedModel = codexSettings?.model ?? input.model;
-    const resolvedThinking = codexSettings?.thinking ?? input.thinking;
-    const resolvedProvider = normalizePiBindingProvider({
-      cli: input.cli,
+    const selection = resolveConfiguredSelection(input.cli, {
       provider: input.provider,
-      model: resolvedModel
+      model: codexSettings?.model ?? input.model,
+      thinking: codexSettings?.thinking ?? input.thinking
     });
+    const { model: resolvedModel, thinking: resolvedThinking, provider: resolvedProvider } = selection;
 
     const entries = await this.listCatalog();
     if (entries.length === 0) {

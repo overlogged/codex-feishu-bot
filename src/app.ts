@@ -1,3 +1,8 @@
+import { getProviderCatalog } from "./services/provider-catalog.js";
+import { getCodexModelCatalog } from "./services/codex-model-catalog.js";
+import { LocalDevinUsageReader } from "./services/devin-usage-reader.js";
+import { DevinAcpWorker } from "./integrations/codex/devin-acp-worker.js";
+import { ClaudeProviderService } from "./services/claude-provider-service.js";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -59,7 +64,8 @@ function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
       claude: new ClaudeCliWorker(env, logger),
       kimi: new KimiAcpWorker(env, logger),
       pi: new PiRpcWorker(env, logger),
-      dsh: new DshAcpWorker(env, logger)
+      dsh: new DshAcpWorker(env, logger),
+      devin: new DevinAcpWorker(env, logger)
     });
   }
 
@@ -89,6 +95,8 @@ export interface AppRuntime {
 }
 
 export function buildAppRuntime(env: Env): AppRuntime {
+  getProviderCatalog();
+  getCodexModelCatalog();
   const app = Fastify({
     logger: true
   });
@@ -155,7 +163,9 @@ export function buildAppRuntime(env: Env): AppRuntime {
       credentialsFile: env.KIMI_CODE_CREDENTIALS_FILE,
       logger: app.log
     }),
-    usageSnapshotStore
+    usageSnapshotStore,
+    new LocalDevinUsageReader({ database: env.DEVIN_USAGE_DATABASE, command: env.DEVIN_ACP_COMMAND,
+      proxy: env.DEVIN_PROXY_URL, cacheMs: env.USAGE_CCUSAGE_CACHE_MS }, app.log)
   );
   const tokenDailyReportService = new TokenDailyReportService(
     sessionStore,
@@ -190,11 +200,13 @@ export function buildAppRuntime(env: Env): AppRuntime {
       codex: "codex",
       kimi: env.KIMI_ACP_COMMAND,
       claude: env.CLAUDE_CLI_COMMAND,
+      devin: env.DEVIN_ACP_COMMAND,
       pi: env.PI_CLI_COMMAND
     },
     usageStatsService,
     env.TOKEN_DAILY_REPORT_TIME,
-    codexAuthService
+    codexAuthService,
+    new ClaudeProviderService(env.CC_SWITCH_COMMAND)
   );
   const agentManager = new AgentManagerService(
     env.DEFAULT_WORKSPACE,

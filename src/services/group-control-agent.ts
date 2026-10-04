@@ -1,3 +1,5 @@
+import { getProviderCatalog, normalizeCliName, renderProviderCatalogPrompt } from "./provider-catalog.js";
+import { getCodexModelCatalog } from "./codex-model-catalog.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -20,6 +22,8 @@ interface LoggerLike {
 }
 
 export type GroupControlIntent =
+  | { kind: "list_claude_providers" }
+  | { kind: "switch_claude_provider"; provider: string }
   | {
       kind: "help";
       detail: string;
@@ -158,25 +162,8 @@ function requireString(record: Record<string, unknown>, key: string): string {
 }
 
 function normalizeCli(value: string): ChatCli {
-  const normalized = value.trim().toLowerCase();
-  if (
-    normalized === "codex" ||
-    normalized === "claude" ||
-    normalized === "kimi" ||
-    normalized === "pi" ||
-    normalized === "dsh"
-  ) {
-    return normalized;
-  }
-
-  // ds / deepseek 默认交给 dsh（DeepSeek Harness）；glm / openmodel 仍走 pi。
-  if (normalized === "deepseek" || normalized === "ds" || normalized === "ds4") {
-    return "dsh";
-  }
-
-  if (normalized === "glm" || normalized === "openmodel") {
-    return "pi";
-  }
+  const cli = normalizeCliName(value);
+  if (cli) return cli;
 
   throw new Error(`控制 agent 返回了不支持的 CLI：${value}`);
 }
@@ -197,6 +184,7 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
   switch (kind) {
     case "list_workspaces":
     case "show_binding":
+    case "list_claude_providers":
     case "show_quota":
     case "list_schedules":
     case "new_session":
@@ -204,6 +192,8 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
       return {
         kind
       };
+    case "switch_claude_provider":
+      return { kind, provider: requireString(parsed, "provider") };
     case "set_goal":
       return {
         kind,
@@ -211,14 +201,15 @@ function parseIntentRecord(parsed: Record<string, unknown>): GroupControlIntent 
       };
     case "bind_workspace": {
       const cli = normalizeCli(requireString(parsed, "cli"));
+      const native = getProviderCatalog().backends[cli].nativeSettings;
       return {
         kind,
         cli,
         code: requireString(parsed, "code"),
-        // dsh 的模型/provider 由 profile 配置决定，忽略控制 agent 可能多填的字段。
-        provider: cli === "dsh" ? undefined : optionalString(parsed, "provider"),
-        model: cli === "dsh" ? undefined : optionalString(parsed, "model"),
-        thinking: cli === "dsh" ? undefined : optionalString(parsed, "thinking")
+        // Native-only backends retain their local profile until explicitly configured otherwise.
+        provider: native ? undefined : optionalString(parsed, "provider"),
+        model: native ? undefined : optionalString(parsed, "model"),
+        thinking: native ? undefined : optionalString(parsed, "thinking")
       };
     }
     case "create_schedule":
@@ -324,6 +315,7 @@ function buildInterpreterPrompt(
     summary: string;
   }
 ): string {
+  const models = getCodexModelCatalog();
   const strippedMessage = stripMentions(message.text);
   const currentGoal = context.goal?.trim() || "(未设置或当前不是 Codex 绑定)";
   const currentBinding = context.currentBinding.configured
@@ -355,8 +347,12 @@ function buildInterpreterPrompt(
     "可返回的 kind：",
     '- {"kind":"list_workspaces"}',
     '- {"kind":"show_binding"}',
+    '- {"kind":"list_claude_providers"}',
+    '- {"kind":"switch_claude_provider","provider":"<供应商完整 ID 或名称>"}',
     '- {"kind":"show_quota"}',
-    '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|deepseek|ds","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
+    "- 用户问 provider/供应商有哪些、查看 CC Switch 配置时，返回 list_claude_providers。",
+    "- 用户明确要求切换 Claude provider/供应商时，返回 switch_claude_provider。这是本机全局切换，不是工作区绑定；不要猜测供应商 ID，缺少目标时返回列表。",
+    '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|devin|deepseek|ds","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
     '- {"kind":"create_one_time_schedule","prompt":"<任务内容>"[,"runAt":"<ISO 8601 时间>"]}',
@@ -381,14 +377,12 @@ function buildInterpreterPrompt(
     "- 用户说“撤销/取消/删掉某个定时任务”时，可根据语义返回 pause_schedule 或 delete_schedule。",
     "- 绑定工作区时，必须从下面给出的目录编号里选 code。",
     "- 绑定工作区时，如果用户没有明确指定 CLI，cli 默认返回 codex。",
-    "- Codex 只支持两个模型选项：GPT-6 / GPT6 / Astra 对应 model=gpt-6-astra；GPT-5.6 Sol / 5.6 Sol / 5.6 Soul 对应 model=gpt-5.6-sol。",
-    "- 绑定到 Codex 且用户没有指定模型时，model 默认返回 gpt-6-astra。",
+    `- Codex 模型选项以本轮配置为准（覆盖历史模型列表）：${models.models.map((model) => `${[model.id, ...model.aliases].join(" / ")} 对应 model=${model.id}`).join("；")}。`,
+    `- 绑定到 Codex 且用户没有指定模型时，model 默认返回 ${models.defaultModel}。`,
     "- Codex 思考深度可指定 low / medium / high / xhigh / max / ultra；用户说低/中/高/嗨/极高/最高/超强时分别规范为对应英文值。",
-    "- 绑定到 Codex 且用户没有指定思考深度时，thinking 默认返回 high。",
-    "- 用户说 'deepseek'、'ds'、'ds4'、'ds4.1'、'DeepSeek V4 Flash'、'DS4 Flash'、'DeepSeek V4.1 Flash'、'DS4.1 Flash'、'DeepSeek V4 Pro'、'DS4 Pro' 时，cli 返回 dsh（DeepSeek Harness），不要填 model/provider，dsh 的模型由 profile 配置决定。",
-    "- 用户说 'GLM'、'GLM Flash'、'GLM 5.3 Flash'、'glm flash'、'openmodel' 时，cli 应该返回 pi，provider 返回 openmodel，model 返回 glm-5.3-flash；GLM 只能绑定到 pi，不要给 codex/kimi/claude/dsh 填 glm 模型。",
-    "- 用户明确说 'pi' 时 cli 返回 pi；用户说 'dsh' 时 cli 返回 dsh。绑定 dsh 时不要填 model、provider、thinking。",
-    "- provider 字段只在用户明确指定时才填，否则省略（让运行时按环境变量或默认规则处理）。",
+    `- 绑定到 Codex 且用户没有指定思考深度时，thinking 默认返回 ${models.defaultThinking}。`,
+    "- 用户明确说 Devin 时 cli 返回 devin；未指定模型时省略 model，使用 Devin 本机默认模型。Devin 模型使用其原生模型 ID，不要自动填 Codex 的默认模型或 thinking/provider。",
+    renderProviderCatalogPrompt(),
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",
     "- 如果用户问额度/token/用量/花费/剩余，返回 show_quota。",

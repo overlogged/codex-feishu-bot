@@ -1,3 +1,4 @@
+import type { DevinUsageReader } from "./devin-usage-reader.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -66,6 +67,7 @@ const RECENT_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 
 const CCUSAGE_CLIS = ["codex", "claude", "kimi", "pi"] as const;
+const USAGE_CLIS = [...CCUSAGE_CLIS, "devin"] as const;
 
 const execFileAsync = promisify(execFile);
 
@@ -150,6 +152,8 @@ function renderCliLabel(cli: string): string {
       return "Kimi";
     case "pi":
       return "Pi";
+    case "devin":
+      return "Devin";
     case "dsh":
       return "DSH";
     case "codex":
@@ -358,7 +362,8 @@ export class UsageStatsService {
     private readonly logger?: LoggerLike,
     commandRunner?: UsageStatsCommandRunner,
     kimiQuotaClient?: KimiQuotaReader,
-    private readonly snapshotStore?: UsageSnapshotStore
+    private readonly snapshotStore?: UsageSnapshotStore,
+    private readonly devinUsageReader?: DevinUsageReader
   ) {
     this.ccusageCommand = config.ccusageCommand;
     this.cacheMs = config.cacheMs;
@@ -410,13 +415,13 @@ export class UsageStatsService {
       ...kimiQuotaLines,
       ...(accountUsageLines ? ["", "【Codex 累计用量】", ...accountUsageLines] : []),
       "",
-      "【今日消耗（ccusage，自然日）】",
+      "【今日消耗（本机 CLI，自然日）】",
       ...todayLines,
       "",
       "【近 1 小时消耗（估算）】",
       ...recentLines,
       "",
-      "【各 CLI 历史用量（本月，ccusage）】",
+      "【各 CLI 历史用量（本月）】",
       ...ccusageLines,
       "",
       this.renderPricingNote()
@@ -439,7 +444,8 @@ export class UsageStatsService {
     return [
       `费用说明：ccusage 按公开 API 定价估算，USD 按汇率 ${this.usdToCnyRate} 折算为人民币。`,
       "订阅套餐（Kimi / Codex）的金额是按 API 价格的折算，不等于实际账单；自定义 provider 的价格取自本机 pi 的 models.json，配置为 0 就会显示 0。",
-      "仅供参考。"
+      "Devin 按本机记录去重统计，使用当前 Devin 模型目录价格估算（含缓存）；Claude 缓存写入按 5 分钟价格估算。不代表 Devin 订阅实际扣费，免费模型按目录显示 0，缺少定价显示未知。",
+      "统计范围为本机所有会话，不限当前群；仅供参考。"
     ].join("\n");
   }
 
@@ -568,7 +574,7 @@ export class UsageStatsService {
     const monthKey = currentMonthKey();
     const lines: string[] = [];
 
-    for (const cli of CCUSAGE_CLIS) {
+    for (const cli of USAGE_CLIS) {
       const months = summaries.get(cli);
       if (!months || months.length === 0) {
         continue;
@@ -581,7 +587,7 @@ export class UsageStatsService {
 
       lines.push(
         `${renderCliLabel(cli)}（${month.month}）：${formatTokenCount(month.totalTokens)} token${
-          month.totalCost !== null ? `，估算费用 ${this.formatCny(month.totalCost)}` : ""
+          month.totalCost !== null ? `，估算费用 ${this.formatCny(month.totalCost)}` : "，费用未知（含未定价用量）"
         }`
       );
       for (const model of month.topModels) {
@@ -604,8 +610,9 @@ export class UsageStatsService {
     let totalCost = 0;
     let hasTokens = false;
     let hasCost = false;
+    let incompleteCost = false;
 
-    for (const cli of CCUSAGE_CLIS) {
+    for (const cli of USAGE_CLIS) {
       const rows = summaries.get(cli);
       if (!rows) {
         continue;
@@ -620,6 +627,7 @@ export class UsageStatsService {
         totalTokens += row.totalTokens;
         hasTokens = true;
       }
+      if (row.totalCost === null) incompleteCost = true;
       if (typeof row.totalCost === "number") {
         totalCost += row.totalCost;
         hasCost = true;
@@ -627,7 +635,7 @@ export class UsageStatsService {
 
       lines.push(
         `${renderCliLabel(cli)}：${formatTokenCount(row.totalTokens)} token${
-          row.totalCost !== null ? `，估算费用 ${this.formatCny(row.totalCost)}` : ""
+          row.totalCost !== null ? `，估算费用 ${this.formatCny(row.totalCost)}` : "，费用未知（含未定价用量）"
         }`
       );
       for (const model of row.topModels) {
@@ -645,7 +653,7 @@ export class UsageStatsService {
 
     lines.push(
       `合计：${formatTokenCount(hasTokens ? totalTokens : null)} token${
-        hasCost ? `，估算费用 ${this.formatCny(totalCost)}` : ""
+        hasCost ? `，${incompleteCost ? "已知部分" : ""}估算费用 ${this.formatCny(totalCost)}` : "，费用未知"
       }`
     );
     return lines;
@@ -657,7 +665,7 @@ export class UsageStatsService {
     const totals: Record<string, UsageSnapshotCliTotals> = {};
     let any = false;
 
-    for (const cli of CCUSAGE_CLIS) {
+    for (const cli of USAGE_CLIS) {
       const rows = summaries.get(cli);
       if (!rows) {
         continue;
@@ -735,7 +743,10 @@ export class UsageStatsService {
 
     const lines: string[] = [];
     let total = 0;
-    for (const cli of CCUSAGE_CLIS) {
+    let knownCost = 0;
+    let hasCost = false;
+    let missingCost = false;
+    for (const cli of USAGE_CLIS) {
       const nowTokens = current[cli]?.tokens ?? null;
       const beforeTokens = reference.totals[cli]?.tokens ?? null;
       if (nowTokens === null || beforeTokens === null) {
@@ -744,14 +755,20 @@ export class UsageStatsService {
 
       const delta = Math.max(0, nowTokens - beforeTokens);
       total += delta;
-      lines.push(`${renderCliLabel(cli)}：${formatTokenCount(delta)} token`);
+      const currentCost = current[cli]?.cost;
+      const previousCost = reference.totals[cli]?.cost;
+      const cost = typeof currentCost === "number" && typeof previousCost === "number"
+        ? Math.max(0, currentCost - previousCost) : null;
+      if (cost === null) missingCost = true;
+      else { knownCost += cost; hasCost = true; }
+      lines.push(`${renderCliLabel(cli)}：${formatTokenCount(delta)} token${cost === null ? "，费用未知" : `，估算费用 ${this.formatCny(cost)}`}`);
     }
 
     if (lines.length === 0) {
       return ["近 1 小时暂无可估算数据"];
     }
 
-    lines.push(`合计：${formatTokenCount(total)} token`);
+    lines.push(`合计：${formatTokenCount(total)} token${hasCost ? `，${missingCost ? "已知部分" : ""}估算费用 ${this.formatCny(knownCost)}` : "，费用未知"}`);
     return lines;
   }
 
@@ -771,6 +788,7 @@ export class UsageStatsService {
           summaries.set(cli, await this.fetchCcusageDaily(cli));
         })
       );
+      if (this.devinUsageReader) summaries.set("devin", await this.devinUsageReader.readDaily());
       this.ccusageDailyCache = {
         expiresAt: Date.now() + this.cacheMs,
         summaries
@@ -818,6 +836,27 @@ export class UsageStatsService {
         summaries.set(cli, await this.fetchCcusageMonthly(cli));
       })
     );
+    if (this.devinUsageReader) {
+      const daily = await this.devinUsageReader.readDaily();
+      const months = new Map<string, CcusageMonthlySummary>();
+      for (const day of daily ?? []) {
+        const key = day.date.slice(0, 7);
+        const month = months.get(key) ?? { month: key, totalTokens: 0, totalCost: 0, topModels: [] };
+        month.totalTokens = (month.totalTokens ?? 0) + day.totalTokens;
+        month.totalCost = month.totalCost === null || day.totalCost === null ? null : month.totalCost + day.totalCost;
+        for (const model of day.topModels) {
+          const previous = month.topModels.find(m => m.modelName === model.modelName);
+          if (!previous) month.topModels.push({ ...model });
+          else {
+            previous.totalTokens = (previous.totalTokens ?? 0) + model.totalTokens;
+            previous.cost = previous.cost === null || model.cost === null ? null : previous.cost + model.cost;
+          }
+        }
+        month.topModels.sort((a,b) => (b.totalTokens ?? 0) - (a.totalTokens ?? 0));
+        months.set(key, month);
+      }
+      summaries.set("devin", daily === null ? null : [...months.values()]);
+    }
     this.ccusageCache = {
       expiresAt: Date.now() + this.cacheMs,
       summaries

@@ -1,3 +1,6 @@
+import { normalizeCliName, findConfiguredModel, resolveConfiguredSelection } from "./provider-catalog.js";
+import { getCodexModelCatalog } from "./codex-model-catalog.js";
+import { ClaudeProviderService, parseClaudeProviderCommand } from "./claude-provider-service.js";
 import type {
   ChatCli,
   ChatSession,
@@ -6,7 +9,6 @@ import type {
   ScheduledTaskRecord
 } from "../domain/types.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
-import { PI_DS_FLASH_MODEL } from "../integrations/codex/pi-rpc-worker.js";
 import {
   readThreadTranscript,
   renderTranscriptExcerpt,
@@ -198,6 +200,8 @@ function renderCliLabel(cli: ChatCli): string {
       return "Kimi";
     case "pi":
       return "Pi";
+    case "devin":
+      return "Devin";
     case "dsh":
       return "DSH";
     case "codex":
@@ -228,50 +232,14 @@ function extractGroupBindingCommand(
   }
 
   const lowerParts = parts.map((part) => part.toLowerCase());
-  const cliCandidate = lowerParts.find((part) =>
-    ["codex", "claude", "kimi", "pi", "dsh", "deepseek", "ds", "ds4"].includes(part)
-  );
-
-  // ds / deepseek 默认交给 dsh（DeepSeek Harness）；显式 pi 时才走 pi。
-  const cli: ChatCli =
-    cliCandidate === "deepseek" || cliCandidate === "ds" || cliCandidate === "ds4"
-      ? "dsh"
-      : cliCandidate === "pi"
-        ? "pi"
-        : cliCandidate === "dsh"
-          ? "dsh"
-          : cliCandidate === "claude"
-            ? "claude"
-            : cliCandidate === "codex"
-              ? "codex"
-              : "codex";
-
-  // dsh 的模型/provider 由 profile 配置决定，这里不再注入 model/thinking。
-  const model: string | undefined =
-    cli === "dsh"
-      ? undefined
-      : /(?:gpt\s*-?\s*6|gpt6|gpt-6|astra)/i.test(normalizedText)
-        ? "gpt-6-astra"
-        : /(?:gpt\s*-?\s*)?5\.6(?:\s*-?\s*(?:sol|soul))?/i.test(normalizedText)
-          ? "gpt-5.6-sol"
-          : normalizedText.includes("ds4.1 flash") ||
-              normalizedText.includes("v4.1 flash") ||
-              normalizedText.includes("ds4 flash") ||
-              normalizedText.includes("v4 flash")
-            ? PI_DS_FLASH_MODEL
-            : normalizedText.includes("ds4 pro") ||
-          normalizedText.includes("v4 pro")
-                ? PI_DS_FLASH_MODEL
-                : normalizedText.includes("deepseek") ||
-          normalizedText.includes("ds4.1") ||
-          normalizedText.includes("ds4") ||
-          lowerParts.includes("ds")
-                  ? PI_DS_FLASH_MODEL
-                  : undefined;
-  const thinkingCandidate = lowerParts.find((part) =>
-    ["low", "medium", "high", "xhigh", "max", "ultra"].includes(part)
-  );
-  const thinking = cli === "dsh" ? undefined : thinkingCandidate;
+  const cli: ChatCli = lowerParts.map(normalizeCliName).find((value) => value !== undefined) ?? "codex";
+  const selected = findConfiguredModel(cli, normalizedText, true);
+  const selection = resolveConfiguredSelection(cli, {
+    model: selected?.id,
+    provider: selected?.provider,
+    thinking: lowerParts.find((part) => ["low", "medium", "high", "xhigh", "max", "ultra"].includes(part))
+  });
+  const { model, thinking, provider } = selection;
 
   if (parts.length === 1 && code === parts[0]) {
     return {
@@ -287,6 +255,7 @@ function extractGroupBindingCommand(
   return {
     code,
     cli,
+    provider,
     model,
     thinking
   };
@@ -427,6 +396,7 @@ function renderScheduleHelp(): string {
 }
 
 function renderControlHelp(defaultWorkspace: string): string {
+  const models = getCodexModelCatalog();
   return [
     "群里直接发普通消息，就是项目会话。",
     "群里 @机器人，会进入这个群单独的配置线程，而且会持续复用。",
@@ -434,9 +404,9 @@ function renderControlHelp(defaultWorkspace: string): string {
     "常见命令：",
     "1. 私聊机器人发送 工作区，先拿目录编号",
     "2. 群里发 @机器人 12",
-    "3. 群里发 @机器人 claude 12",
-    "4. 群里发 @机器人 codex GPT6 high 12",
-    "5. 群里发 @机器人 codex 5.6 Sol xhigh 12",
+    "3. 群里发 @机器人 claude 12，或 @机器人 devin 12",
+    `4. 群里发 @机器人 codex ${models.defaultModel} ${models.defaultThinking} 12`,
+    `5. 群里发 @机器人 codex ${models.models.at(-1)?.id} xhigh 12`,
     "6. 群里发 @机器人 pi ds4 flash 12",
     "7. 群里发 @机器人 新会话",
     "8. 群里发 @机器人 设置 goal 为 每次先检查测试再改代码",
@@ -444,10 +414,12 @@ function renderControlHelp(defaultWorkspace: string): string {
     "10. 群里发 @机器人 定时任务 添加 0 9 * * 1-5 | 生成工作日报",
     "11. 群里发 @机器人 临时任务：今天 18:30 检查线上流水线",
     "12. 群里发 @机器人 工具卡片 开（默认关闭，开启后同步工具调用过程）",
+    "13. 群里发 @机器人 provider（查看 Claude 供应商列表）",
+    "14. 群里发 @机器人 切换 claude provider ikuncode（全局切换，后续任务生效）",
     "",
     "也支持自然语言，比如“把这个群切到 codex 的 12 号目录”“看看这个群现在绑到哪”。",
     "如果一句话里有多个配置动作，也会按顺序执行，比如“先暂停 1，再把 2 改成工作日 9 点发日报”。",
-    "Codex 默认是 GPT-6 Astra + high；也可选 GPT-5.6 Sol，并指定 low / medium / high / xhigh / max / ultra。",
+    `Codex 默认是 ${models.defaultModel} + ${models.defaultThinking}；可选模型：${models.models.map((model) => model.id).join(" / ")}；思考深度 low / medium / high / xhigh / max / ultra。`,
     `工作区根目录是 ${defaultWorkspace}，只列一级子目录。`
   ].join("\n");
 }
@@ -465,7 +437,7 @@ function renderWorkspaceCatalogMessage(
         `可绑定的工作区编号如下，根目录是 ${defaultWorkspace}：`,
         ...entries.map((entry) => `${entry.code}. ${entry.workspace}`),
         "",
-        "支持的 CLI：codex / claude / kimi / pi",
+        "支持的 CLI：codex / claude / kimi / pi / dsh / devin",
         "你可以直接说：",
         "@机器人 把这个群绑定到 codex 的 2 号目录",
         "@机器人 把这个群切到 claude 的 Quant",
@@ -671,6 +643,7 @@ function isNewSessionCommand(message: IncomingChatMessage): boolean {
 
 export class ChatOrchestrator {
   private readonly seenIncomingMessages = new Map<string, number>();
+  private readonly devinMessageQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly sessionStore: SessionStore,
@@ -701,7 +674,8 @@ export class ChatOrchestrator {
     private readonly resumeCliCommands: SessionResumeCliCommands = {},
     private readonly usageStatsService?: UsageStatsService,
     private readonly tokenDailyReportDefaultTime = "23:00",
-    private readonly codexAuthService?: CodexAuthService
+    private readonly codexAuthService?: CodexAuthService,
+    private readonly claudeProviderService?: ClaudeProviderService
   ) {}
 
   enqueue(message: IncomingChatMessage): void {
@@ -775,6 +749,30 @@ export class ChatOrchestrator {
         messageId: message.messageId,
         context: "发送工作区配置提示失败"
       });
+      return;
+    }
+
+    if (workspaceResolution.cli === "devin") {
+      const previous = this.devinMessageQueues.get(message.chatId);
+      const queued = Boolean(previous || existingSession?.activeRunId);
+      const task = (async () => {
+        if (queued) await this.sendTextNotice(message.chatId,
+          "Devin 正在执行，这条消息已排队，会在前面的任务结束后处理。",
+          { messageId: message.messageId, context: "发送 Devin 排队回执失败" });
+        await previous;
+        while (this.sessionStore.get(message.chatId)?.activeRunId) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        // Bindings may change while a message is waiting.
+        const routing = await this.workspaceResolver.resolve({ message, session: this.sessionStore.get(message.chatId) });
+        if (routing.ok) await this.handleMessage(message, routing);
+        else await this.sendTextNotice(message.chatId, routing.detail,
+          { messageId: message.messageId, context: "发送工作区配置提示失败" });
+      })().catch((error) => this.logger.error({ error, chatId: message.chatId }, "Devin 排队消息处理失败"));
+      this.devinMessageQueues.set(message.chatId, task);
+      try { await task; } finally {
+        if (this.devinMessageQueues.get(message.chatId) === task) this.devinMessageQueues.delete(message.chatId);
+      }
       return;
     }
 
@@ -1200,7 +1198,7 @@ export class ChatOrchestrator {
         activeRunId: messageSession.activeRunId,
         textPreview: message.text.slice(0, 160)
       },
-      "检测到活跃 Codex turn，直接 steer 新消息"
+      "检测到活跃 turn，直接 steer 新消息"
     );
 
     this.runStore.update(messageSession.activeRunId, {
@@ -1225,7 +1223,7 @@ export class ChatOrchestrator {
         turnId: messageSession.activeTurnId
       });
 
-      if (activeRunElapsedMs >= STEER_ACKNOWLEDGEMENT_THRESHOLD_MS) {
+      if (messageSession.cli === "claude" || activeRunElapsedMs >= STEER_ACKNOWLEDGEMENT_THRESHOLD_MS) {
         await this.sendTextNotice(
           message.chatId,
           "已收到你的新消息，正在把它交给当前仍在执行的任务。",
@@ -1237,6 +1235,21 @@ export class ChatOrchestrator {
       }
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
+
+      if (messageSession.cli === "claude") {
+        // A message can race the last result/EOF. Wait for that run's cleanup
+        // instead of releasing it early and spawning overlapping Claude turns.
+        this.logger.info({ chatId: message.chatId, messageId: message.messageId,
+          activeRunId: messageSession.activeRunId }, "Claude steer 通道已收尾，等待原任务结束后接续消息");
+        while (this.sessionStore.get(message.chatId)?.activeRunId === messageSession.activeRunId) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        await this.dispatchActiveOrNew(this.sessionStore.get(message.chatId), message, routing ?? {
+          cli: messageSession.cli, workspaceId, provider: messageSession.provider,
+          model: messageSession.model, thinking: messageSession.thinking
+        });
+        return;
+      }
 
       if ((error as { code?: string } | undefined)?.code === "KIMI_TURN_BLOCKED_WAIT") {
         this.logger.info(
@@ -1438,6 +1451,17 @@ export class ChatOrchestrator {
       (message.chatType !== "group" || message.mentionsBot)
     ) {
       await this.handleQuotaCommand(message);
+      return true;
+    }
+
+    const providerCommand = message.chatType !== "group" || message.mentionsBot
+      ? parseClaudeProviderCommand(stripMentions(message.text)) : undefined;
+    if (providerCommand) {
+      await this.sendTextNotice(message.chatId,
+        this.claudeProviderService ? await this.claudeProviderService.execute(providerCommand) : "当前环境未配置 CC Switch。", {
+          messageId: message.messageId, context: "发送 Claude provider 信息失败",
+          ...buildControlReplyMetadata(message)
+        });
       return true;
     }
 
@@ -1927,6 +1951,16 @@ export class ChatOrchestrator {
             ...replyMetadata
           }
         );
+        return;
+      }
+      case "list_claude_providers":
+      case "switch_claude_provider": {
+        await this.sendTextNotice(message.chatId,
+          this.claudeProviderService ? await this.claudeProviderService.execute(
+            intent.kind === "list_claude_providers" ? { action: "list" } : { action: "switch", query: intent.provider }
+          ) : "当前环境未配置 CC Switch。", {
+            messageId: message.messageId, context: "发送 Claude provider 信息失败", ...replyMetadata
+          });
         return;
       }
       case "show_quota": {
