@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type {
+  ChatCli,
   CodexEvent,
   ConversationItem,
   IncomingChatMessage,
@@ -1678,7 +1679,7 @@ test("ChatOrchestrator binds group workspace with an explicit cli selector", asy
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi" | "dsh" | "devin";
+        cli: ChatCli;
         code: string;
       }
     | undefined;
@@ -1768,7 +1769,7 @@ test("ChatOrchestrator binds group workspace with the full Codex 6.1 Sol model I
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi" | "dsh" | "devin";
+        cli: ChatCli;
         code: string;
       }
     | undefined;
@@ -3502,7 +3503,7 @@ test("ChatOrchestrator binds group workspace with the Devin cli selector", async
   let bindInput:
     | {
         chatId: string;
-        cli: "codex" | "claude" | "kimi" | "pi" | "dsh" | "devin";
+        cli: ChatCli;
         code: string;
       }
     | undefined;
@@ -3579,4 +3580,148 @@ test("ChatOrchestrator binds group workspace with the Devin cli selector", async
     thinking: undefined
   });
   assert.match(sentTexts[0] ?? "", /Devin/);
+});
+test("ChatOrchestrator binds group workspace with the MCode cli selector and reports MCode", async () => {
+  const sessionStore = new SessionStore();
+  const runStore = new RunStore();
+  const conversationStore = new ConversationStore();
+  const projector = new MessageProjector(runStore, conversationStore);
+  const sentTexts: string[] = [];
+  let bindInput:
+    | {
+        chatId: string;
+        cli: ChatCli;
+        code: string;
+      }
+    | undefined;
+
+  const orchestrator = new ChatOrchestrator(
+    sessionStore,
+    runStore,
+    conversationStore,
+    createFeishuClient({
+      async sendText(input) {
+        sentTexts.push(input.content);
+        return "om_text_group_bound_mcode";
+      }
+    }),
+    {
+      schedule() {
+        return undefined;
+      },
+      async flushRun() {
+        return undefined;
+      }
+    } as never,
+    projector,
+    {
+      async ensureThread() {
+        return "thread_should_not_start";
+      },
+      async *runTurn(): AsyncGenerator<CodexEvent> {}
+    },
+    createWorkspaceResolver({
+      async bindGroupWorkspace(input) {
+        bindInput = input;
+        return {
+          ok: true,
+          cli: "mcode",
+          entry: {
+            code: "10",
+            workspace: "Quant",
+            workspaceId: "/home/overlogged/Quant"
+          },
+          configFilePath: "/home/overlogged/.codex-feishu-bot/chat-workspaces.json"
+        };
+      }
+    }),
+    createScheduleService(),
+    "/home/overlogged",
+    createLogger(),
+    createGroupControlAgent({
+      async interpret() {
+        return createControlResult({
+          kind: "bind_workspace",
+          cli: "mcode",
+          code: "10"
+        });
+      }
+    })
+  );
+
+  orchestrator.enqueue(
+    createControlSession({
+      messageId: "om_group_bind_mcode_1",
+      text: "@托帕 mcode 10"
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(bindInput, {
+    chatId: "oc_group_1",
+    cli: "mcode",
+    code: "10",
+    provider: undefined,
+    model: undefined,
+    thinking: undefined
+  });
+  // 绑定请求必须带着 mcode 落到工作区配置里；会话 cli 要等下一条消息由
+  // resolve() 读该配置后才会切过来，控制线程本身先以 codex 起。
+  assert.equal(sessionStore.get("oc_group_1")?.cli, "codex");
+  // 确认文案要用 MCode，而不是掉进 default 分支显示成 Codex。
+  assert.match(sentTexts[0] ?? "", /MCode/);
+  assert.doesNotMatch(sentTexts[0] ?? "", /Codex/);
+});
+
+test("a slow control reply cannot erase or resurrect a concurrent Devin run", async () => {
+  for (const finishesBeforeControl of [false, true]) {
+    const sessions = new SessionStore();
+    const runs = new RunStore();
+    const conversations = new ConversationStore();
+    let releaseControl!: () => void;
+    let controlStarted!: () => void;
+    const started = new Promise<void>(resolve => { controlStarted = resolve; });
+    const gate = new Promise<void>(resolve => { releaseControl = resolve; });
+    sessions.save({ chatId: "oc_group_1", cli: "devin", workspaceId: "/workspace", threadId: "devin-session", updatedAt: new Date().toISOString(),
+      ...(finishesBeforeControl ? { activeRunId: "old-run", activeTurnId: "old-turn" } : {}) });
+    const orchestrator = new ChatOrchestrator(sessions, runs, conversations, createFeishuClient(),
+      { schedule() {}, async flushRun() {} } as never, new MessageProjector(runs, conversations),
+      { async ensureThread() { return "devin-session"; }, async *runTurn() {} },
+      createWorkspaceResolver(), createScheduleService(), "/workspace", createLogger(),
+      createGroupControlAgent({ async interpret() { controlStarted(); await gate; return createControlResult({ kind: "help", detail: "done" }); } }));
+    orchestrator.enqueue(createMessage({ mentionsBot: true, text: "@bot 帮助" }));
+    await started;
+    if (finishesBeforeControl) sessions.releaseRun("oc_group_1", "old-run");
+    else { sessions.attachRun("oc_group_1", "new-run"); sessions.bindTurn("oc_group_1", "new-turn", "new-run"); }
+    releaseControl();
+    for (let i = 0; i < 100 && !sessions.get("oc_group_1")?.controlThreadId; i++) await new Promise(r => setTimeout(r, 5));
+    assert.ok(sessions.get("oc_group_1")?.controlThreadId);
+    assert.equal(sessions.get("oc_group_1")?.activeRunId, finishesBeforeControl ? undefined : "new-run");
+    assert.equal(sessions.get("oc_group_1")?.activeTurnId, finishesBeforeControl ? undefined : "new-turn");
+  }
+});
+
+test("simultaneous Devin schedules reserve the chat before asynchronous startup", async () => {
+  const sessions = new SessionStore();
+  const runs = new RunStore();
+  const conversations = new ConversationStore();
+  let started = 0;
+  let signalStarted!: () => void;
+  const turnStarted = new Promise<void>(resolve => { signalStarted = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const orchestrator = new ChatOrchestrator(sessions, runs, conversations, createFeishuClient(),
+    createNoopDeliveryService(), new MessageProjector(runs, conversations),
+    { async ensureThread() { return "devin-session"; }, async *runTurn() { started++; signalStarted(); await gate; } },
+    createWorkspaceResolver({ async resolve() { return { ok: true, cli: "devin", workspaceId: "/workspace" }; } }),
+    createScheduleService(), "/workspace", createLogger());
+  const task: ScheduledTaskRecord = { chatId: "oc_group_1", taskId: "race", cron: "* * * * *", prompt: "test", status: "enabled", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), nextRunAt: new Date().toISOString() };
+  const first = orchestrator.triggerScheduledTask(task);
+  try {
+    assert.deepEqual(await orchestrator.triggerScheduledTask({ ...task, taskId: "race2" }), { outcome: "busy" });
+    await turnStarted;
+    assert.equal(started, 1);
+  } finally { release(); await first; }
+  assert.equal(runs.list().length, 1);
 });

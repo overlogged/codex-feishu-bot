@@ -1,3 +1,4 @@
+import { CHAT_CLI_VALUES } from "../domain/types.js";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +49,10 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
     goalUpdatedAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z"
   } as never);
+  for (const cli of CHAT_CLI_VALUES) {
+    sessionStore.save({ chatId: `restore-${cli}`, threadId: `${cli}-persisted-session`, cli,
+      workspaceId: "/workspace", updatedAt: "2026-03-09T00:00:00.000Z" });
+  }
   runStore.save({
     runId: "run_1",
     chatId: "oc_chat_1",
@@ -107,6 +112,10 @@ test("RuntimeStatePersister restores sessions and clears stale active run state"
     }
   ]);
 
+  for (const cli of CHAT_CLI_VALUES) {
+    assert.equal(restoredSessionStore.get(`restore-${cli}`)?.cli, cli);
+    assert.equal(restoredSessionStore.get(`restore-${cli}`)?.threadId, `${cli}-persisted-session`);
+  }
   const restoredSession = restoredSessionStore.get("oc_chat_1");
   assert.ok(restoredSession);
   assert.equal(restoredSession.threadId, "thread_1");

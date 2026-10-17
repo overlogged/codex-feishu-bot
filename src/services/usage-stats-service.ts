@@ -156,6 +156,8 @@ function renderCliLabel(cli: string): string {
       return "Devin";
     case "dsh":
       return "DSH";
+    case "mcode":
+      return "MCode";
     case "codex":
     default:
       return "Codex";

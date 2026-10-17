@@ -14,6 +14,7 @@ import { CodexAppServerWorker } from "./integrations/codex/app-server-worker.js"
 import { ClaudeCliWorker } from "./integrations/codex/claude-cli-worker.js";
 import type { CodexWorker } from "./integrations/codex/codex-worker.js";
 import { DshAcpWorker } from "./integrations/codex/dsh-acp-worker.js";
+import { McodeAcpWorker } from "./integrations/codex/mcode-acp-worker.js";
 import { KimiAcpWorker } from "./integrations/codex/kimi-acp-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
 import { PiRpcWorker, PI_DS_FLASH_MODEL } from "./integrations/codex/pi-rpc-worker.js";
@@ -65,6 +66,7 @@ function buildCodexWorker(env: Env, logger: LoggerLike): CodexWorker {
       kimi: new KimiAcpWorker(env, logger),
       pi: new PiRpcWorker(env, logger),
       dsh: new DshAcpWorker(env, logger),
+      mcode: new McodeAcpWorker(env, logger),
       devin: new DevinAcpWorker(env, logger)
     });
   }

@@ -87,7 +87,25 @@ export class DevinAcpWorker implements CodexWorker {
     await active.session.waitForIdle();
   }
 
+  private readonly turnLocks = new Map<string, Promise<void>>();
+
   async *runTurn(context: CodexTurnContext & { threadId: string }): AsyncGenerator<CodexEvent> {
+    const key = context.message.chatId;
+    const previous = this.turnLocks.get(key);
+    let release!: () => void;
+    const reservation = new Promise<void>((resolve) => { release = resolve; });
+    const tail = (previous ?? Promise.resolve()).then(() => reservation);
+    this.turnLocks.set(key, tail);
+    await previous;
+    try {
+      yield* this.runExclusiveTurn(context);
+    } finally {
+      release();
+      if (this.turnLocks.get(key) === tail) this.turnLocks.delete(key);
+    }
+  }
+
+  private async *runExclusiveTurn(context: CodexTurnContext & { threadId: string }): AsyncGenerator<CodexEvent> {
     const turnId = randomUUID();
     const session = await this.getSession(context);
     await session.waitForIdle();
@@ -107,11 +125,8 @@ export class DevinAcpWorker implements CodexWorker {
       for (const event of projector.ingestUpdate(update)) queue.push(event);
     });
     this.logger?.info({ cli: "devin", chatId: context.message.chatId, threadId: sessionId }, "开始执行 Devin ACP turn");
-    yield { kind: "thread_bound", threadId: sessionId };
-    yield { kind: "turn_bound", turnId };
-    yield { kind: "run_status", status: "running" };
 
-    void (async () => {
+    const completion = (async () => {
       try {
         const result = await session.prompt(buildCliTurnInput(context));
         for (const event of projector.finalize({ cancelled: active.interrupted || result.stopReason === "cancelled" })) queue.push(event);
@@ -124,7 +139,16 @@ export class DevinAcpWorker implements CodexWorker {
         queue.close();
       }
     })();
-    yield* queue.iterate();
+    try {
+      yield { kind: "thread_bound", threadId: sessionId };
+      yield { kind: "turn_bound", turnId };
+      yield { kind: "run_status", status: "running" };
+      yield* queue.iterate();
+    } finally {
+      // A consumer may stop iterating before ACP finishes. Keep ownership until idle.
+      if (this.activeTurns.has(turnId)) { active.interrupted = true; session.cancel(); }
+      await completion;
+    }
   }
 
   async close(): Promise<void> {

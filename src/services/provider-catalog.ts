@@ -18,7 +18,7 @@ const backend = z.object({
     providerModels: z.record(name).default({})
   })).default([])
 }).strict();
-const schema = z.object({ backends: z.object({ codex: backend, claude: backend, kimi: backend, pi: backend, dsh: backend, devin: backend }).strict() }).strict();
+const schema = z.object({ backends: z.object({ codex: backend, claude: backend, kimi: backend, pi: backend, dsh: backend, mcode: backend, devin: backend }).strict() }).strict();
 export type ProviderCatalog = z.infer<typeof schema>;
 export const normalizeName = (value: string) => value.trim().toLowerCase().replace(/[\s_]+/g, "-");
 

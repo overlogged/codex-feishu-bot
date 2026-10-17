@@ -1,3 +1,4 @@
+import { CHAT_CLI_VALUES } from "../domain/types.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -103,8 +104,8 @@ export interface RuntimeRestoreResult {
 }
 
 function normalizeCli(value: unknown): ChatCli {
-  return value === "claude" || value === "kimi" || value === "pi" || value === "dsh"
-    ? value
+  return typeof value === "string" && (CHAT_CLI_VALUES as readonly string[]).includes(value)
+    ? value as ChatCli
     : "codex";
 }
 

@@ -204,6 +204,8 @@ function renderCliLabel(cli: ChatCli): string {
       return "Devin";
     case "dsh":
       return "DSH";
+    case "mcode":
+      return "MCode";
     case "codex":
     default:
       return "Codex";
@@ -437,7 +439,7 @@ function renderWorkspaceCatalogMessage(
         `可绑定的工作区编号如下，根目录是 ${defaultWorkspace}：`,
         ...entries.map((entry) => `${entry.code}. ${entry.workspace}`),
         "",
-        "支持的 CLI：codex / claude / kimi / pi / dsh / devin",
+        "支持的 CLI：codex / claude / kimi / pi / dsh / mcode / devin",
         "你可以直接说：",
         "@机器人 把这个群绑定到 codex 的 2 号目录",
         "@机器人 把这个群切到 claude 的 Quant",
@@ -809,7 +811,25 @@ export class ChatOrchestrator {
     await this.handleMessage(message, workspaceResolution);
   }
 
-  private async handleMessage(
+  private readonly devinRuns = new Map<string, Promise<void>>();
+
+  private async handleMessage(message: IncomingChatMessage, routing?: ChatRouting): Promise<void> {
+    const cli = routing?.cli ?? this.sessionStore.get(message.chatId)?.cli;
+    if (cli !== "devin") return this.executeMessage(message, routing);
+    const previous = this.devinRuns.get(message.chatId);
+    // Reserve synchronously, before session creation or handoff can yield.
+    const task = (async () => {
+      await previous;
+      await this.executeMessage(message, routing);
+    })();
+    const settled = task.catch(() => undefined);
+    this.devinRuns.set(message.chatId, settled);
+    try { await task; } finally {
+      if (this.devinRuns.get(message.chatId) === settled) this.devinRuns.delete(message.chatId);
+    }
+  }
+
+  private async executeMessage(
     message: IncomingChatMessage,
     routing?: ChatRouting
   ): Promise<void> {
@@ -1366,7 +1386,7 @@ export class ChatOrchestrator {
 
   async triggerScheduledTask(task: ScheduledTaskRecord): Promise<ScheduledTaskTriggerResult> {
     const message = this.createScheduledTaskMessage(task);
-    const existingSession = this.sessionStore.get(task.chatId);
+    let existingSession = this.sessionStore.get(task.chatId);
     const workspaceResolution = await this.workspaceResolver.resolve({
       message,
       session: existingSession
@@ -1386,6 +1406,13 @@ export class ChatOrchestrator {
         outcome: "pause",
         reason: workspaceResolution.detail
       };
+    }
+
+    // Workspace resolution is asynchronous; the active turn may have changed.
+    existingSession = this.sessionStore.get(task.chatId);
+    if (workspaceResolution.cli === "devin" &&
+        (this.devinRuns.has(task.chatId) || this.devinMessageQueues.has(task.chatId))) {
+      return { outcome: "busy" };
     }
 
     if (
@@ -1809,11 +1836,11 @@ export class ChatOrchestrator {
       this.sessionStore.save(
         buildControlSessionPatch(
           message,
-          existingSession,
+          this.sessionStore.get(message.chatId),
           {
             controlThreadId,
             controlCli: result.cli,
-            controlReplyToMessageId: existingSession?.controlReplyToMessageId
+            controlReplyToMessageId: this.sessionStore.get(message.chatId)?.controlReplyToMessageId
           },
           this.defaultWorkspace
         )
@@ -2792,7 +2819,7 @@ export class ChatOrchestrator {
 
   private canInterruptForLatestMessage(cli: ChatCli): boolean {
     return (
-      (cli === "kimi" || cli === "pi" || cli === "claude" || cli === "dsh") &&
+      (cli === "kimi" || cli === "pi" || cli === "claude" || cli === "dsh" || cli === "mcode") &&
       Boolean(this.codexWorker.interruptTurn)
     );
   }

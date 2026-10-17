@@ -39,7 +39,7 @@ test("all backend configuration reloads in existing resolver, control agent, Pi 
       return `│ ${switched ? "✓" : " "} ┆ test-gateway ┆ Test ┆ N/A │`;
     });
     const config = JSON.parse(source);
-    for (const cli of ["claude", "kimi", "pi", "dsh", "devin"]) {
+    for (const cli of ["claude", "kimi", "pi", "dsh", "mcode", "devin"]) {
       const backend = config.backends[cli];
       backend.nativeSettings = false;
       backend.aliases.push(`test-${cli}`);
@@ -51,7 +51,7 @@ test("all backend configuration reloads in existing resolver, control agent, Pi 
     config.backends.pi.models.at(-1).providerModels = { "test-gateway": "upstream/future" };
     config.backends.claude.providers.push({ id: "test-gateway", aliases: ["new provider"] });
     await writeFile(file, JSON.stringify(config));
-    for (const cli of ["claude", "kimi", "pi", "dsh", "devin"] as const) {
+    for (const cli of ["claude", "kimi", "pi", "dsh", "mcode", "devin"] as const) {
       assert.equal(normalizeCliName(`test-${cli}`), cli);
       const bound = await resolver.bindGroupWorkspace({ chatId: cli, cli, code: "1", model: "future model" });
       assert.ok(bound.ok);

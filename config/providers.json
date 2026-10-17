@@ -134,6 +134,20 @@
       "providers": [],
       "nativeSettings": true
     },
+    "mcode": {
+      "aliases": [
+        "mcode",
+        "mcode-acp",
+        "MiniMax Code",
+        "minimax",
+        "minimax-code",
+        "mcode m3",
+        "M3"
+      ],
+      "models": [],
+      "providers": [],
+      "nativeSettings": true
+    },
     "devin": {
       "aliases": [],
       "models": [],

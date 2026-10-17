@@ -113,3 +113,38 @@ test("Devin sends resolved model ID for both new and restored sessions", async (
     } finally { await worker.close(); }
   }
 });
+
+test("concurrent Devin turns share one process and never replace each other's event handler", async () => {
+  const fake = fakeRuntime();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let preparations = 0;
+  fake.runtime.prepare = async () => { preparations++; await gate; };
+  const worker = new DevinAcpWorker({ DEVIN_ACP_COMMAND: "devin" }, undefined, fake.runtime);
+  try {
+    const first = collect(worker, "pending:devin:race");
+    const second = collect(worker, "pending:devin:race");
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(preparations, 1);
+    release();
+    const results = await Promise.all([first, second]);
+    assert.equal(fake.processes(), 1);
+    for (const events of results) {
+      assert.equal(events.filter(e => e.kind === "assistant_message_completed" && e.text === "DONE").length, 1);
+    }
+    assert.equal(fake.calls.filter(c => c.method === "session/new").length, 1);
+    assert.equal(fake.calls.filter(c => c.method === "session/prompt").length, 2);
+  } finally { release(); await worker.close(); }
+});
+
+test("a failed Devin turn releases its lock for the next request", async () => {
+  const fake = fakeRuntime();
+  const worker = new DevinAcpWorker({ DEVIN_ACP_COMMAND: "devin" }, undefined, fake.runtime);
+  try {
+    await assert.rejects(async () => {
+      for await (const _ of worker.runTurn({ ...context, threadId: "pending:devin:failure", model: "missing-model" })) {}
+    }, /无法匹配/);
+    assert.ok((await collect(worker, "pending:devin:failure")).some(e => e.kind === "assistant_message_completed"));
+    assert.equal(fake.processes(), 1);
+  } finally { await worker.close(); }
+});
