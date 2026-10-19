@@ -1,4 +1,6 @@
+import { clearProxyEnv } from "../../config/proxy-env.js";
 import { applyAcpBindingSettings } from "./acp-binding-settings.js";
+import { applyDshModelSelection } from "./dsh-session-settings.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
@@ -23,9 +25,22 @@ interface LoggerLike {
 
 const DSH_LABEL = "DSH ACP";
 
+/** DSH uses Node fetch; proxy environment support must be enabled at process startup. */
+export function dshProcessEnv(proxy?: string, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  clearProxyEnv(env);
+  delete env.NODE_USE_ENV_PROXY;
+  if (proxy?.trim()) {
+    env.http_proxy = env.https_proxy = env.HTTP_PROXY = env.HTTPS_PROXY = proxy.trim();
+    env.no_proxy = env.NO_PROXY = "localhost,127.0.0.1,::1";
+    env.NODE_USE_ENV_PROXY = "1";
+  }
+  return env;
+}
+
 class HostDshAcpRuntime implements KimiAcpRuntime {
   constructor(
-    private readonly env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE">
+    private readonly env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE"> & Partial<Pick<Env, "DSH_PROXY_URL">>
   ) {}
 
   spawnProcess(options: {
@@ -37,7 +52,7 @@ class HostDshAcpRuntime implements KimiAcpRuntime {
       ["--profile", this.env.DSH_ACP_PROFILE],
       {
         cwd: options.context.workspaceId,
-        env: process.env,
+        env: dshProcessEnv(this.env.DSH_PROXY_URL),
         stdio: ["pipe", "pipe", "pipe"]
       }
     );
@@ -52,12 +67,14 @@ class HostDshAcpRuntime implements KimiAcpRuntime {
 interface ActiveDshTurn {
   session: KimiAcpSession;
   interrupted: boolean;
+  chatId: string;
+  threadId: string;
 }
 
 /**
  * DeepSeek Harness 后端，通过官方 `dsh --profile acp` 暴露的 ACP v1 stdio 协议接入。
  * 复用 Kimi ACP 的 JSON-RPC 客户端与事件投影，只替换进程启动方式和会话标签。
- * 默认沿用 dsh profile；统一配置关闭 nativeSettings 后可应用 ACP 支持的绑定选项。
+ * 支持按群选择 DeepSeek 账号和 OpenCode 等 provider，并使用 ACP 广告的模型路由。
  */
 export class DshAcpWorker implements CodexWorker {
   private readonly sessionsByChatId = new Map<string, KimiAcpSession>();
@@ -68,7 +85,7 @@ export class DshAcpWorker implements CodexWorker {
 
   constructor(
     env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE"> &
-      Partial<Pick<Env, "DSH_ACP_REASONING">>,
+      Partial<Pick<Env, "DSH_ACP_REASONING" | "DSH_PROXY_URL">>,
     private readonly logger?: LoggerLike,
     runtime?: KimiAcpRuntime
   ) {
@@ -76,8 +93,61 @@ export class DshAcpWorker implements CodexWorker {
     this.reasoningEffort = env.DSH_ACP_REASONING?.trim() || undefined;
   }
 
+  /**
+   * dsh 的 ACP 没有 in-turn 输入通道：`KimiAcpSession.runPrompt` 必须等前一轮
+   * `session/prompt` 返回才能发下一次（同 session 不允许并发 prompt，否则 agent 会回
+   * "another turn is already in progress"）。所以这里的 steer 语义是
+   * **「当前轮自然结束后，用这条消息接力下一轮」**——不调用 session/cancel，
+   * 因此当前任务能正常跑完，只是紧接着处理新消息。
+   *
+   * `KimiAcpSession.prompt` 已内置串行化，这里直接复用即可。
+   */
   supportsSteer(): boolean {
-    return false;
+    return true;
+  }
+
+  /**
+   * 把新消息排进当前会话，在当前轮结束后接力执行。
+   */
+  async steerTurn(context: CodexTurnContext & { threadId: string; turnId: string }): Promise<void> {
+    const activeTurn = this.activeTurns.get(context.turnId);
+    if (!activeTurn) {
+      throw Object.assign(new Error("DSH 当前任务已结束，无法追加消息。"), {
+        code: "DSH_TURN_FINISHED"
+      });
+    }
+
+    if (activeTurn.interrupted || activeTurn.chatId !== context.message.chatId ||
+      activeTurn.threadId !== context.threadId) {
+      throw Object.assign(new Error("DSH 当前任务已进入收尾，等待结束后继续处理新消息。"), {
+        code: "DSH_TURN_FINISHED"
+      });
+    }
+
+    const text = buildCliTurnInput(context);
+    // 不 await：prompt 内部会等当前轮结束再发送，这里只需把接力排上就返回，
+    // 调用方与用户都不会被当前轮的剩余耗时阻塞。
+    void activeTurn.session.prompt(text).catch((error: unknown) => {
+      this.logger?.warn(
+        {
+          chatId: context.message.chatId,
+          messageId: context.message.messageId,
+          sessionId: activeTurn.session.sessionId ?? null,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "DSH ACP 追加 steer 消息失败"
+      );
+    });
+
+    this.logger?.info(
+      {
+        chatId: context.message.chatId,
+        messageId: context.message.messageId,
+        threadId: context.threadId,
+        turnId: context.turnId
+      },
+      "已向运行中的 DSH 会话排队 steer 消息，将在当前轮结束后接力"
+    );
   }
 
   async ensureThread(context: CodexTurnContext): Promise<string> {
@@ -132,10 +202,13 @@ export class DshAcpWorker implements CodexWorker {
       threadId: sessionId
     };
 
-    // dsh ACP 会话默认没有 reasoning_effort，不设置的话模型不会输出思考过程。
-    if (this.reasoningEffort) {
+    // Model selection resets model-dependent reasoning settings in DSH.
+    await applyDshModelSelection(session, { provider: context.provider, model: context.model });
+    if (context.thinking) {
+      await applyAcpBindingSettings(session, { thinking: context.thinking });
+    } else if (this.reasoningEffort) {
       try {
-        await session.setConfigOption("reasoning_effort", this.reasoningEffort);
+        await applyAcpBindingSettings(session, { thinking: this.reasoningEffort });
       } catch (error) {
         this.logger?.warn(
           {
@@ -149,13 +222,13 @@ export class DshAcpWorker implements CodexWorker {
       }
     }
 
-    await applyAcpBindingSettings(session, { provider: context.provider, model: context.model, thinking: context.thinking });
-
     const eventQueue = new AsyncEventQueue<CodexEvent>();
     const projector = new KimiAcpTurnProjector(turnId, DSH_LABEL);
     const activeTurn: ActiveDshTurn = {
       session,
-      interrupted: false
+      interrupted: false,
+      chatId: context.message.chatId,
+      threadId: context.threadId
     };
     this.activeTurns.set(turnId, activeTurn);
 

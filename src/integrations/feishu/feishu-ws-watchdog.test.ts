@@ -107,6 +107,110 @@ test("FeishuWsWatchdog 启动后从未连上也会在宽限期结束后重建", 
   assert.deepEqual(staleCalls, [2_000]);
 });
 
+test("FeishuWsWatchdog 判定半开连接：readyState 仍为 OPEN 但长时间无任何帧", () => {
+  let now = 0;
+  // socket 始终报告 OPEN，正是半开连接的特征。
+  const connected = true;
+  let lastActivityAt: number | null = 0;
+  const staleCalls: Array<{ downMs: number; reason: string }> = [];
+  const { logger, entries } = createLogger();
+
+  const watchdog = new FeishuWsWatchdog({
+    isConnected: () => connected,
+    lastActivityAt: () => lastActivityAt,
+    logger,
+    checkIntervalMs: 1_000,
+    staleAfterMs: 3_000,
+    silentAfterMs: 10_000,
+    now: () => now,
+    onStale: (info) => {
+      staleCalls.push(info);
+    }
+  });
+
+  // 有活动时保持 connected。
+  now = 5_000;
+  lastActivityAt = 4_000;
+  assert.equal(watchdog.tick(), "connected");
+  assert.deepEqual(staleCalls, []);
+
+  // 静默未达阈值时仍然认为正常。
+  now = 10_000;
+  assert.equal(watchdog.tick(), "connected", "静默未超过阈值不应误判");
+
+  // 静默超过阈值后，即使 readyState 还是 OPEN 也必须重建。
+  now = 15_000;
+  assert.equal(watchdog.tick(), "stale");
+  assert.deepEqual(staleCalls, [{ downMs: 11_000, reason: "silent" }]);
+
+  // 同一轮静默只重建一次，避免刷爆。
+  now = 16_000;
+  assert.equal(watchdog.tick(), "stale");
+  assert.equal(staleCalls.length, 1, "同一轮静默只触发一次重建");
+
+  assert.ok(
+    entries.some((entry) => entry.level === "error"),
+    "半开连接应当记录 error 级日志"
+  );
+});
+
+test("FeishuWsWatchdog 收到新帧后解除半开判定", () => {
+  let now = 0;
+  const connected = true;
+  let lastActivityAt: number | null = 0;
+  const staleCalls: Array<{ downMs: number; reason: string }> = [];
+  const { logger } = createLogger();
+
+  const watchdog = new FeishuWsWatchdog({
+    isConnected: () => connected,
+    lastActivityAt: () => lastActivityAt,
+    logger,
+    checkIntervalMs: 1_000,
+    staleAfterMs: 3_000,
+    silentAfterMs: 10_000,
+    now: () => now,
+    onStale: (info) => {
+      staleCalls.push(info);
+    }
+  });
+
+  now = 20_000;
+  assert.equal(watchdog.tick(), "stale");
+
+  // 链路恢复：又收到帧了。
+  lastActivityAt = 20_000;
+  assert.equal(watchdog.tick(), "connected");
+  assert.equal(staleCalls.length, 1);
+
+  // 恢复后的静默计时要重新开始，不能沿用旧的判定。
+  now = 25_000;
+  assert.equal(watchdog.tick(), "connected");
+});
+
+test("FeishuWsWatchdog 未提供 lastActivityAt 时退回纯 readyState 判断", () => {
+  let now = 0;
+  const connected = true;
+  const staleCalls: Array<{ downMs: number; reason: string }> = [];
+  const { logger } = createLogger();
+
+  const watchdog = new FeishuWsWatchdog({
+    isConnected: () => connected,
+    logger,
+    checkIntervalMs: 1_000,
+    staleAfterMs: 3_000,
+    silentAfterMs: 10_000,
+    now: () => now,
+    onStale: (info) => {
+      staleCalls.push(info);
+    }
+  });
+
+  // 即使过了很久，没有活性信号也不该判半开。
+  now = 999_000;
+  assert.equal(watchdog.tick(), "connected");
+  assert.deepEqual(staleCalls, []);
+});
+
 test("FeishuWsWatchdog start/stop 使用注入的定时器", () => {
   let scheduled: (() => void) | undefined;
   let scheduledMs: number | undefined;

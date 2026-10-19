@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# Public OAuth client identifier shipped by kimi-cli, not a client secret.
+# Match only this exact public identifier in this file; keep other detection enabled.
+[[allowlists]]
+description = "Kimi CLI public OAuth client ID"
+condition = "AND"
+paths = ['''(^|/)src/integrations/kimi/kimi-quota-client\.ts$''']
+regexTarget = "secret"
+regexes = ['''^17e5f671-d194-4dfb-9706-5516cb48c098$''']

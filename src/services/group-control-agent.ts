@@ -352,7 +352,7 @@ function buildInterpreterPrompt(
     '- {"kind":"show_quota"}',
     "- 用户问 provider/供应商有哪些、查看 CC Switch 配置时，返回 list_claude_providers。",
     "- 用户明确要求切换 Claude provider/供应商时，返回 switch_claude_provider。这是本机全局切换，不是工作区绑定；不要猜测供应商 ID，缺少目标时返回列表。",
-    '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|devin|deepseek|ds","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
+    '- {"kind":"bind_workspace","cli":"codex|claude|kimi|pi|dsh|mcode|devin|deepseek|ds","code":"<目录编号>"[,"provider":"<可选 provider>","model":"<可选模型>","thinking":"<可选 thinking>"]}',
     '- {"kind":"list_schedules"}',
     '- {"kind":"create_schedule","cron":"<5段 cron>","prompt":"<任务内容>"}',
     '- {"kind":"create_one_time_schedule","prompt":"<任务内容>"[,"runAt":"<ISO 8601 时间>"]}',
@@ -382,6 +382,7 @@ function buildInterpreterPrompt(
     "- Codex 思考深度可指定 low / medium / high / xhigh / max / ultra；用户说低/中/高/嗨/极高/最高/超强时分别规范为对应英文值。",
     `- 绑定到 Codex 且用户没有指定思考深度时，thinking 默认返回 ${models.defaultThinking}。`,
     "- 用户明确说 Devin 时 cli 返回 devin；未指定模型时省略 model，使用 Devin 本机默认模型。Devin 模型使用其原生模型 ID，不要自动填 Codex 的默认模型或 thinking/provider。",
+    "- 用户明确说 DSH / ds / deepseek 时使用 dsh；DeepSeek 账号对应 deepseek-account，OpenCode Go 订阅对应 opencode-go；provider 只影响该群绑定。DeepSeek Flash 和 Pro 是不同模型，按请求保留。用户问 dsh 的模型或 provider 选项时，用下面配置生成 help，不要转成 Claude provider 操作。",
     renderProviderCatalogPrompt(),
     "- 如果用户只说“工作区”“有哪些目录”，返回 list_workspaces。",
     "- 如果用户问当前这个群绑到哪里，返回 show_binding。",
@@ -429,7 +430,9 @@ export class CodexGroupControlAgent implements GroupControlAgent {
     private readonly defaultWorkspace: string,
     private readonly logger?: LoggerLike,
     private readonly cli: ChatCli = "codex",
-    private readonly model?: string
+    private readonly model?: string,
+    private readonly provider?: string,
+    private readonly thinking?: string
   ) {}
 
   async interpret(
@@ -486,6 +489,8 @@ export class CodexGroupControlAgent implements GroupControlAgent {
         cli: this.cli,
         workspaceId: this.defaultWorkspace,
         model: this.model,
+        provider: this.provider,
+        thinking: this.thinking,
         message: internalMessage,
         threadId: resolvedThreadId
       })) {

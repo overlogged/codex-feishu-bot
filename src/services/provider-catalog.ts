@@ -18,7 +18,7 @@ const backend = z.object({
     providerModels: z.record(name).default({})
   })).default([])
 }).strict();
-const schema = z.object({ backends: z.object({ codex: backend, claude: backend, kimi: backend, pi: backend, dsh: backend, devin: backend }).strict() }).strict();
+const schema = z.object({ backends: z.object({ codex: backend, claude: backend, kimi: backend, pi: backend, dsh: backend, mcode: backend, devin: backend }).strict() }).strict();
 export type ProviderCatalog = z.infer<typeof schema>;
 export const normalizeName = (value: string) => value.trim().toLowerCase().replace(/[\s_]+/g, "-");
 
@@ -115,5 +115,5 @@ export function resolveConfiguredSelection(cli: ChatCli, input: { model?: string
 }
 
 export function renderProviderCatalogPrompt(): string {
-  return `以下 CLI/provider/模型配置以本轮为准，覆盖历史规则。aliases 为别名；未配置默认值则省略相应字段，沿用 CLI 本机配置。nativeSettings=true 时不要返回 model/provider/thinking，使用 CLI 本机配置；其他非 Codex 模型允许传入后端原生 ID。providerModels 仅供运行时转换，绑定返回模型 id。Claude provider 切换通过 switch_claude_provider（全局 CC Switch）执行，不写群绑定 provider。Kimi/DSH 的显式设置要求 ACP 会话支持对应配置项。\n${JSON.stringify(getProviderCatalog())}`;
+  return `以下 CLI/provider/模型配置以本轮为准，覆盖历史规则。aliases 为别名；未配置默认值则省略相应字段，沿用 CLI 本机配置。nativeSettings=true 时不要返回 model/provider/thinking，使用 CLI 本机配置；其他非 Codex 模型允许传入后端原生 ID。providerModels 供 Pi/DSH 运行时转换，绑定返回模型 id。Claude provider 切换通过 switch_claude_provider（全局 CC Switch）执行，不写群绑定 provider。Kimi/DSH 的显式设置要求 ACP 会话支持对应配置项。\n${JSON.stringify(getProviderCatalog())}`;
 }

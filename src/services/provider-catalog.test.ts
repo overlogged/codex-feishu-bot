@@ -39,7 +39,7 @@ test("all backend configuration reloads in existing resolver, control agent, Pi 
       return `│ ${switched ? "✓" : " "} ┆ test-gateway ┆ Test ┆ N/A │`;
     });
     const config = JSON.parse(source);
-    for (const cli of ["claude", "kimi", "pi", "dsh", "devin"]) {
+    for (const cli of ["claude", "kimi", "pi", "dsh", "mcode", "devin"]) {
       const backend = config.backends[cli];
       backend.nativeSettings = false;
       backend.aliases.push(`test-${cli}`);
@@ -51,7 +51,7 @@ test("all backend configuration reloads in existing resolver, control agent, Pi 
     config.backends.pi.models.at(-1).providerModels = { "test-gateway": "upstream/future" };
     config.backends.claude.providers.push({ id: "test-gateway", aliases: ["new provider"] });
     await writeFile(file, JSON.stringify(config));
-    for (const cli of ["claude", "kimi", "pi", "dsh", "devin"] as const) {
+    for (const cli of ["claude", "kimi", "pi", "dsh", "mcode", "devin"] as const) {
       assert.equal(normalizeCliName(`test-${cli}`), cli);
       const bound = await resolver.bindGroupWorkspace({ chatId: cli, cli, code: "1", model: "future model" });
       assert.ok(bound.ok);
@@ -71,7 +71,7 @@ test("all backend configuration reloads in existing resolver, control agent, Pi 
     assert.equal(getProviderCatalog().backends.pi.defaultProvider, "test-gateway");
     await writeFile(file, source);
     assert.equal(normalizeCliName("test-pi"), undefined);
-    assert.deepEqual(resolveConfiguredSelection("dsh", { model: "invented" }), { model: undefined, provider: undefined, thinking: undefined });
+    assert.deepEqual(resolveConfiguredSelection("kimi", { model: "invented" }), { model: undefined, provider: undefined, thinking: undefined });
   } finally {
     if (previous === undefined) delete process.env.CHAT_PROVIDER_CONFIG_FILE;
     else process.env.CHAT_PROVIDER_CONFIG_FILE = previous;
@@ -101,5 +101,35 @@ test("rejects ambiguous aliases, invalid references and unsupported global-provi
       assert.deepEqual(reader.read(), valid);
       assert.throws(() => new ProviderCatalogFile(path).read());
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("DSH bindings persist independent DeepSeek account and OpenCode selections", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dsh-bindings-"));
+  try {
+    await mkdir(join(root, "project"));
+    const file = join(root, ".bindings.json");
+    const resolver = new FileBackedChatWorkspaceResolver(root, file);
+    const defaults = await resolver.bindGroupWorkspace({ chatId: "account", cli: "dsh", code: "1" });
+    assert.ok(defaults.ok);
+    assert.equal(defaults.provider, "deepseek-account");
+    assert.equal(defaults.model, "deepseek-flash");
+    const go = await resolver.bindGroupWorkspace({ chatId: "go", cli: "dsh", code: "1", provider: "OpenCode Go", model: "pro", thinking: "high" });
+    assert.ok(go.ok);
+    assert.equal(go.provider, "opencode-go");
+    assert.equal(go.model, "deepseek-v4-pro");
+    const reload = new FileBackedChatWorkspaceResolver(root, file);
+    for (const chatId of ["account", "go"]) {
+      const result = await reload.resolve({ message: { ...message, chatId } });
+      assert.ok(result.ok);
+      assert.equal(result.provider, chatId === "account" ? "deepseek-account" : "opencode-go");
+      assert.equal(result.model, chatId === "account" ? "deepseek-flash" : "deepseek-v4-pro");
+    }
+    const other = resolveConfiguredSelection("dsh", { provider: "opencode", model: "GLM-5.3" });
+    assert.equal(other.provider, "opencode-go");
+    assert.equal(other.model, "glm-5.3");
+    const flash = resolveConfiguredSelection("dsh", { provider: "opencode", model: "flash" }, true);
+    assert.equal(flash.model, "deepseek-v4.1-flash");
+    assert.equal(flash.provider, "opencode-go");
   } finally { await rm(root, { recursive: true, force: true }); }
 });

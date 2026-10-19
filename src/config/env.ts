@@ -82,18 +82,26 @@ const envSchema = z.object({
   CLAUDE_PROXY_URL: optionalNonEmptyString,
   CC_SWITCH_COMMAND: z.string().default("cc-switch"),
   KIMI_ACP_COMMAND: z.string().default("kimi"),
-  DEVIN_USAGE_DATABASE: z.string().default(join(homedir(), ".local/share/devin/cli/sessions.db")),
   DEVIN_ACP_COMMAND: z.string().default("devin"),
   DEVIN_ACP_MODEL: optionalNonEmptyString,
   DEVIN_PROXY_URL: optionalNonEmptyString,
   DSH_ACP_COMMAND: z.string().default("dsh"),
   DSH_ACP_PROFILE: z.string().default("acp"),
-  /** dsh ACP 会话的 reasoning_effort；留空则不设置（模型不会输出思考过程）。 */
+  DSH_PROXY_URL: optionalNonEmptyString,
+  /** dsh 模型切换后的默认 reasoning_effort；绑定优先，不支持时沿用模型默认。 */
   DSH_ACP_REASONING: z.string().default("high"),
+  /** MiniMax Code CLI；ACP 子命令让 mcode 以 ACP v1 stdio 提供服务。 */
+  MCODE_ACP_COMMAND: z.string().default("mcode"),
+  /** 传给 mcode ACP 的参数；`mcode acp` 让 MiniMax Code 以 ACP v1 stdio 提供服务。 */
+  MCODE_ACP_ARGS: z.string().transform((value) => value.split(" ").filter(Boolean)).default("acp"),
+  /** mcode ACP 会话的思考档位；留空则不设置（模型不会输出思考过程）。 */
+  MCODE_ACP_REASONING: optionalNonEmptyString.default("high"),
+  /** mcode ACP 会话的权限模式，对应 `permissionMode` 配置项。 */
+  MCODE_ACP_PERMISSION_MODE: optionalNonEmptyString.default("bypassPermissions"),
   PI_CLI_COMMAND: z.string().default("pi"),
-  PI_CLI_PROVIDER: optionalNonEmptyString.default("openrouter"),
-  PI_CLI_MODEL: optionalNonEmptyString.default("deepseek-flash"),
-  PI_CLI_THINKING: optionalNonEmptyString.default("xhigh"),
+  PI_CLI_PROVIDER: optionalNonEmptyString.default("opencode-go"),
+  PI_CLI_MODEL: optionalNonEmptyString.default("deepseek-v4.1-flash"),
+  PI_CLI_THINKING: optionalNonEmptyString.default("high"),
   LIVE_UPDATE_DEBOUNCE_MS: z.coerce.number().int().positive().default(1200),
   CCUSAGE_COMMAND: z.string().default("ccusage"),
   /** codex-auth 多账号 CLI 命令。 */
@@ -105,7 +113,6 @@ const envSchema = z.object({
   USAGE_CCUSAGE_CACHE_MS: z.coerce.number().int().positive().default(300000),
   USAGE_USD_TO_CNY_RATE: z.coerce.number().positive().default(7.2),
   USAGE_SNAPSHOT_FILE: z.string().default(".codex-feishu-bot/usage-snapshots.json"),
-  USAGE_SNAPSHOT_INTERVAL_MS: z.coerce.number().int().positive().default(600000),
   /** 每日 token 消耗日报默认发送时间（HH:mm，本地时区）。 */
   TOKEN_DAILY_REPORT_TIME: z.string().default("23:00"),
   KIMI_CODE_CREDENTIALS_FILE: z
@@ -118,6 +125,12 @@ const envSchema = z.object({
   FEISHU_WS_WATCHDOG_ENABLED: envBoolean(true),
   FEISHU_WS_WATCHDOG_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   FEISHU_WS_WATCHDOG_STALE_MS: z.coerce.number().int().positive().default(180_000),
+  /**
+   * 飞书长连接看门狗：连接仍报告 OPEN 但连续这么久收不到任何帧时判定为半开并重建。
+   * TCP 半开时 readyState 一直是 OPEN，只看它发现不了故障，而长连接不补发事件，
+   * 消息会静默丢失，所以需要一条独立的静默阈值。
+   */
+  FEISHU_WS_WATCHDOG_SILENT_MS: z.coerce.number().int().positive().default(600_000),
   /** 长连接用的代理；留空则回退到 HTTPS_PROXY / HTTP_PROXY。 */
   FEISHU_WS_PROXY_URL: optionalNonEmptyString,
   /** 置 true 则长连接强制直连（忽略代理环境变量）。 */
