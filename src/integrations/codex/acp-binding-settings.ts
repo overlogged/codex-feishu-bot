@@ -1,4 +1,4 @@
-interface ConfigurableAcpSession {
+export interface ConfigurableAcpSession {
   configOptions: unknown[];
   setConfigOption(id: string, value: string): Promise<void>;
 }

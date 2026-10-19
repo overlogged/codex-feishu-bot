@@ -24,9 +24,8 @@ interface PiModelSelection {
   thinking?: string;
 }
 
-export const PI_DS_FLASH_MODEL = "deepseek-flash";
-/** openmodel 网关上的 DeepSeek V4.1 Flash 模型 id（和 deepseek 官方 provider 的 id 不同）。 */
-export const PI_DS_FLASH_OPENMODEL_MODEL = "deepseek-v4.1-flash";
+export const PI_OPENCODE_GO_PROVIDER = "opencode-go";
+export const PI_DS_FLASH_MODEL = "deepseek-v4.1-flash";
 
 /** 有的模型只输出 thinking 不输出正文，用它补一轮索要最终答复。 */
 const PI_FINAL_ANSWER_PROMPT =
@@ -126,7 +125,8 @@ function resolvePiSettings(
   env: Pick<Env, "PI_CLI_PROVIDER" | "PI_CLI_MODEL" | "PI_CLI_THINKING">,
   context: CodexTurnContext
 ): PiResolvedSettings {
-  const messageSelection = selectPiModelFromMessage(context.message.text);
+  // An explicit binding/control model must not be overridden by names in the prompt/catalog.
+  const messageSelection = context.model ? {} : selectPiModelFromMessage(context.message.text);
   const defaults = getProviderCatalog().backends.pi;
   const selection = resolveConfiguredSelection("pi", {
     provider: messageSelection.provider ?? context.provider ?? defaults.defaultProvider ?? env.PI_CLI_PROVIDER,
@@ -134,6 +134,9 @@ function resolvePiSettings(
     thinking: messageSelection.thinking ?? context.thinking ?? defaults.defaultThinking ?? env.PI_CLI_THINKING
   }, true);
   const { provider, model, thinking } = selection;
+  if (provider && !defaults.providers.some((entry) => entry.id === provider)) {
+    throw new Error(`Pi 未启用供应商 ${provider}；可用：${defaults.providers.map((entry) => entry.id).join("、")}。请重新绑定。`);
+  }
   return { provider, model, thinking };
 }
 

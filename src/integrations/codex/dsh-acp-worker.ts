@@ -1,4 +1,6 @@
+import { clearProxyEnv } from "../../config/proxy-env.js";
 import { applyAcpBindingSettings } from "./acp-binding-settings.js";
+import { applyDshModelSelection } from "./dsh-session-settings.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
@@ -23,9 +25,22 @@ interface LoggerLike {
 
 const DSH_LABEL = "DSH ACP";
 
+/** DSH uses Node fetch; proxy environment support must be enabled at process startup. */
+export function dshProcessEnv(proxy?: string, source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  clearProxyEnv(env);
+  delete env.NODE_USE_ENV_PROXY;
+  if (proxy?.trim()) {
+    env.http_proxy = env.https_proxy = env.HTTP_PROXY = env.HTTPS_PROXY = proxy.trim();
+    env.no_proxy = env.NO_PROXY = "localhost,127.0.0.1,::1";
+    env.NODE_USE_ENV_PROXY = "1";
+  }
+  return env;
+}
+
 class HostDshAcpRuntime implements KimiAcpRuntime {
   constructor(
-    private readonly env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE">
+    private readonly env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE"> & Partial<Pick<Env, "DSH_PROXY_URL">>
   ) {}
 
   spawnProcess(options: {
@@ -37,7 +52,7 @@ class HostDshAcpRuntime implements KimiAcpRuntime {
       ["--profile", this.env.DSH_ACP_PROFILE],
       {
         cwd: options.context.workspaceId,
-        env: process.env,
+        env: dshProcessEnv(this.env.DSH_PROXY_URL),
         stdio: ["pipe", "pipe", "pipe"]
       }
     );
@@ -59,7 +74,7 @@ interface ActiveDshTurn {
 /**
  * DeepSeek Harness 后端，通过官方 `dsh --profile acp` 暴露的 ACP v1 stdio 协议接入。
  * 复用 Kimi ACP 的 JSON-RPC 客户端与事件投影，只替换进程启动方式和会话标签。
- * 默认沿用 dsh profile；统一配置关闭 nativeSettings 后可应用 ACP 支持的绑定选项。
+ * 支持按群选择 DeepSeek 账号和 OpenCode 等 provider，并使用 ACP 广告的模型路由。
  */
 export class DshAcpWorker implements CodexWorker {
   private readonly sessionsByChatId = new Map<string, KimiAcpSession>();
@@ -70,7 +85,7 @@ export class DshAcpWorker implements CodexWorker {
 
   constructor(
     env: Pick<Env, "DSH_ACP_COMMAND" | "DSH_ACP_PROFILE"> &
-      Partial<Pick<Env, "DSH_ACP_REASONING">>,
+      Partial<Pick<Env, "DSH_ACP_REASONING" | "DSH_PROXY_URL">>,
     private readonly logger?: LoggerLike,
     runtime?: KimiAcpRuntime
   ) {
@@ -187,10 +202,13 @@ export class DshAcpWorker implements CodexWorker {
       threadId: sessionId
     };
 
-    // dsh ACP 会话默认没有 reasoning_effort，不设置的话模型不会输出思考过程。
-    if (this.reasoningEffort) {
+    // Model selection resets model-dependent reasoning settings in DSH.
+    await applyDshModelSelection(session, { provider: context.provider, model: context.model });
+    if (context.thinking) {
+      await applyAcpBindingSettings(session, { thinking: context.thinking });
+    } else if (this.reasoningEffort) {
       try {
-        await session.setConfigOption("reasoning_effort", this.reasoningEffort);
+        await applyAcpBindingSettings(session, { thinking: this.reasoningEffort });
       } catch (error) {
         this.logger?.warn(
           {
@@ -203,8 +221,6 @@ export class DshAcpWorker implements CodexWorker {
         );
       }
     }
-
-    await applyAcpBindingSettings(session, { provider: context.provider, model: context.model, thinking: context.thinking });
 
     const eventQueue = new AsyncEventQueue<CodexEvent>();
     const projector = new KimiAcpTurnProjector(turnId, DSH_LABEL);

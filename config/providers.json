@@ -57,65 +57,216 @@
     },
     "pi": {
       "aliases": [
-        "glm",
-        "openmodel"
+        "glm"
       ],
       "models": [
         {
-          "id": "glm-5.3-flash",
+          "id": "deepseek-v4.1-flash",
           "aliases": [
-            "glm",
-            "GLM Flash",
-            "GLM 5.3 Flash",
-            "glm 5 3 flash",
-            "glm 53 flash",
-            "openmodel",
-            "open model"
-          ],
-          "provider": "openmodel"
-        },
-        {
-          "id": "deepseek-flash",
-          "aliases": [
+            "deepseek-flash",
             "deepseek",
             "ds",
             "ds4",
             "ds4.1",
+            "dsf4.1",
+            "flash",
             "DeepSeek V4.1 Flash",
+            "DeepSeek-V4.1-Flash",
             "ds4.1 flash",
             "v4.1 flash",
             "DeepSeek V4 Flash",
             "ds4 flash",
-            "v4 flash",
+            "v4 flash"
+          ]
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "aliases": [
+            "pro",
             "DeepSeek V4 Pro",
             "ds4 pro",
-            "v4 pro",
-            "DeepSeek V4.1",
-            "DeepSeek V4",
-            "deepseek-v4.1-flash"
-          ],
-          "fallbackProvider": "openrouter",
-          "providerModels": {
-            "openmodel": "deepseek-v4.1-flash"
-          }
+            "v4 pro"
+          ]
+        },
+        {
+          "id": "claude-haiku-5-5",
+          "aliases": [
+            "Claude Haiku 5.5"
+          ]
+        },
+        {
+          "id": "minimax-m3",
+          "aliases": [
+            "MiniMax-M3"
+          ]
+        },
+        {
+          "id": "qwen3.7-plus",
+          "aliases": [
+            "Qwen3.7 Plus"
+          ]
+        },
+        {
+          "id": "qwen3.8-flash",
+          "aliases": [
+            "Qwen3.8 Flash"
+          ]
+        },
+        {
+          "id": "qwen3.8-max",
+          "aliases": [
+            "Qwen3.8 Max"
+          ]
+        },
+        {
+          "id": "gemini-4-argon-contributor",
+          "aliases": [
+            "Gemini 4 Argon Contributor"
+          ]
+        },
+        {
+          "id": "cat-jam-free",
+          "aliases": [
+            "Cat Jam Free"
+          ]
+        },
+        {
+          "id": "glm-5.2",
+          "aliases": [
+            "GLM-5.2"
+          ]
+        },
+        {
+          "id": "glm-5.3",
+          "aliases": [
+            "GLM-5.3"
+          ]
+        },
+        {
+          "id": "glm-5.3-flash",
+          "aliases": [
+            "GLM-5.3-Flash",
+            "glm",
+            "GLM Flash",
+            "GLM 5.3 Flash"
+          ]
+        },
+        {
+          "id": "hy3",
+          "aliases": [
+            "Hy3"
+          ]
+        },
+        {
+          "id": "hy4-preview",
+          "aliases": [
+            "Hy4 preview"
+          ]
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "aliases": [
+            "Kimi K2.7 Code"
+          ]
+        },
+        {
+          "id": "kimi-k3",
+          "aliases": [
+            "Kimi K3"
+          ]
+        },
+        {
+          "id": "longcat-2.0",
+          "aliases": [
+            "LongCat-2.0"
+          ]
+        },
+        {
+          "id": "longcat-2.5-preview-free",
+          "aliases": [
+            "LongCat 2.5 Preview Free"
+          ]
+        },
+        {
+          "id": "mimo-v2.5",
+          "aliases": [
+            "MiMo V2.5"
+          ]
+        },
+        {
+          "id": "mimo-v2.5-pro",
+          "aliases": [
+            "MiMo V2.5 Pro"
+          ]
+        },
+        {
+          "id": "mimo-v2.6-flash",
+          "aliases": [
+            "MiMo-V2.6-Flash"
+          ]
+        },
+        {
+          "id": "mimo-v2.6-pro",
+          "aliases": [
+            "MiMo-V2.6-Pro"
+          ]
+        },
+        {
+          "id": "space-bunny",
+          "aliases": [
+            "Space Bunny"
+          ]
+        },
+        {
+          "id": "step-5-preview-free",
+          "aliases": [
+            "Step 5 Preview Free"
+          ]
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "aliases": [
+            "GPT-5.6 Luna"
+          ]
+        },
+        {
+          "id": "gpt-6-luna",
+          "aliases": [
+            "GPT-6 Luna"
+          ]
+        },
+        {
+          "id": "grok-4.7",
+          "aliases": [
+            "Grok 4.7"
+          ]
+        },
+        {
+          "id": "muse-spark-1.2-contributor",
+          "aliases": [
+            "Muse Spark 1.2 Contributor"
+          ]
+        },
+        {
+          "id": "muse-spark-1.3-contributor",
+          "aliases": [
+            "Muse Spark 1.3 Contributor"
+          ]
         }
       ],
       "providers": [
         {
-          "id": "openmodel",
+          "id": "opencode-go",
           "aliases": [
-            "open model"
+            "opencode",
+            "OpenCode Go",
+            "go"
           ]
-        },
-        {
-          "id": "openrouter",
-          "aliases": []
-        },
-        {
-          "id": "deepseek",
-          "aliases": []
         }
-      ]
+      ],
+      "defaultProvider": "opencode-go",
+      "defaultModel": "deepseek-v4.1-flash",
+      "defaultThinking": "high"
     },
     "dsh": {
       "aliases": [
@@ -130,9 +281,264 @@
         "DeepSeek V4 Pro",
         "DS4 Pro"
       ],
-      "models": [],
-      "providers": [],
-      "nativeSettings": true
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "aliases": [
+            "flash",
+            "ds flash",
+            "ds4 flash",
+            "ds4.1 flash",
+            "DeepSeek V4.1 Flash",
+            "DeepSeek-V4.1-Flash",
+            "deepseek-v4.1-flash"
+          ],
+          "providerModels": {
+            "opencode-go": "deepseek-v4.1-flash",
+            "openmodel": "deepseek-v4.1-flash"
+          }
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "aliases": [
+            "pro",
+            "ds pro",
+            "ds4 pro",
+            "DeepSeek V4 Pro"
+          ]
+        },
+        {
+          "id": "claude-haiku-5-5",
+          "aliases": [
+            "Claude Haiku 5.5"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "minimax-m3",
+          "aliases": [
+            "MiniMax-M3"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "qwen3.7-plus",
+          "aliases": [
+            "Qwen3.7 Plus"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "qwen3.8-flash",
+          "aliases": [
+            "Qwen3.8 Flash"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "qwen3.8-max",
+          "aliases": [
+            "Qwen3.8 Max"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "gemini-4-argon-contributor",
+          "aliases": [
+            "Gemini 4 Argon Contributor"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "cat-jam-free",
+          "aliases": [
+            "Cat Jam Free"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "glm-5.2",
+          "aliases": [
+            "GLM-5.2"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "glm-5.3",
+          "aliases": [
+            "GLM-5.3"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "glm-5.3-flash",
+          "aliases": [
+            "GLM-5.3-Flash",
+            "glm",
+            "GLM Flash",
+            "GLM 5.3 Flash"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "hy3",
+          "aliases": [
+            "Hy3"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "hy4-preview",
+          "aliases": [
+            "Hy4 preview"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "aliases": [
+            "Kimi K2.7 Code"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "kimi-k3",
+          "aliases": [
+            "Kimi K3"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "longcat-2.0",
+          "aliases": [
+            "LongCat-2.0"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "longcat-2.5-preview-free",
+          "aliases": [
+            "LongCat 2.5 Preview Free"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "mimo-v2.5",
+          "aliases": [
+            "MiMo V2.5"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "mimo-v2.5-pro",
+          "aliases": [
+            "MiMo V2.5 Pro"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "mimo-v2.6-flash",
+          "aliases": [
+            "MiMo-V2.6-Flash"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "mimo-v2.6-pro",
+          "aliases": [
+            "MiMo-V2.6-Pro"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "space-bunny",
+          "aliases": [
+            "Space Bunny"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "step-5-preview-free",
+          "aliases": [
+            "Step 5 Preview Free"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "aliases": [
+            "GPT-5.6 Luna"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "gpt-6-luna",
+          "aliases": [
+            "GPT-6 Luna"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "grok-4.7",
+          "aliases": [
+            "Grok 4.7"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "muse-spark-1.2-contributor",
+          "aliases": [
+            "Muse Spark 1.2 Contributor"
+          ],
+          "provider": "opencode-go"
+        },
+        {
+          "id": "muse-spark-1.3-contributor",
+          "aliases": [
+            "Muse Spark 1.3 Contributor"
+          ],
+          "provider": "opencode-go"
+        }
+      ],
+      "providers": [
+        {
+          "id": "deepseek-account",
+          "aliases": [
+            "DeepSeek 账号",
+            "DeepSeek Account",
+            "ds-account",
+            "账号",
+            "deepseek"
+          ]
+        },
+        {
+          "id": "deepseek-official",
+          "aliases": [
+            "DeepSeek API",
+            "官方 API",
+            "ds-api"
+          ]
+        },
+        {
+          "id": "opencode-go",
+          "aliases": [
+            "opencode",
+            "OpenCode Go",
+            "OpenCode 订阅",
+            "go"
+          ]
+        },
+        {
+          "id": "openmodel",
+          "aliases": [
+            "OpenModel Gateway",
+            "网关"
+          ]
+        }
+      ],
+      "nativeSettings": false,
+      "defaultProvider": "deepseek-account",
+      "defaultModel": "deepseek-flash"
     },
     "mcode": {
       "aliases": [

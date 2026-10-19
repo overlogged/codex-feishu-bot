@@ -14,69 +14,16 @@ import {
   type PiRpcRuntime
 } from "./pi-rpc-worker.js";
 
-test("selectPiModelFromMessage maps retired DeepSeek V4 Pro mentions to V4.1 Flash", () => {
-  assert.deepEqual(selectPiModelFromMessage("用 DeepSeek V4 Pro 写代码"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("deepseek-v4-pro"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("切到 ds4 pro"), {
-    model: "deepseek-flash"
-  });
-});
-
-test("selectPiModelFromMessage detects DeepSeek V4.1 Flash", () => {
-  assert.deepEqual(selectPiModelFromMessage("用 DeepSeek V4.1 Flash 快速回答"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("切到 ds4.1 flash"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("用 DeepSeek V4 Flash 快速回答"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("切到 v4 flash"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("pi ds4 flash"), {
-    model: "deepseek-flash"
-  });
-});
-
-test("selectPiModelFromMessage falls back to DeepSeek V4.1 Flash for generic deepseek or ds4", () => {
-  assert.deepEqual(selectPiModelFromMessage("连 deepseek"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("用 ds4 写代码"), {
-    model: "deepseek-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("用 ds 写代码"), {
-    model: "deepseek-flash"
-  });
-});
-
-test("selectPiModelFromMessage returns empty when no model is mentioned", () => {
+test("Pi aliases resolve Flash and Pro separately on OpenCode Go", () => {
+  for (const text of ["用 DeepSeek V4.1 Flash 快速回答", "切到 ds4.1 flash", "pi ds4 flash", "dsf4.1", "连 deepseek"]) {
+    assert.deepEqual(selectPiModelFromMessage(text), { model: "deepseek-v4.1-flash" });
+  }
+  for (const text of ["用 DeepSeek V4 Pro 写代码", "deepseek-v4-pro", "切到 ds4 pro"]) {
+    assert.deepEqual(selectPiModelFromMessage(text), { model: "deepseek-v4-pro" });
+  }
+  assert.deepEqual(selectPiModelFromMessage("用 GLM 5.3 Flash 写代码"), { model: "glm-5.3-flash" });
   assert.deepEqual(selectPiModelFromMessage("你好"), {});
-});
-
-test("selectPiModelFromMessage detects GLM 5.3 Flash via openmodel provider", () => {
-  assert.deepEqual(selectPiModelFromMessage("用 GLM 5.3 Flash 写代码"), {
-    provider: "openmodel",
-    model: "glm-5.3-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("切到 glm-5.3-flash"), {
-    provider: "openmodel",
-    model: "glm-5.3-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("用 glm flash 快速回答"), {
-    provider: "openmodel",
-    model: "glm-5.3-flash"
-  });
-  assert.deepEqual(selectPiModelFromMessage("换 openmodel 的 glm"), {
-    provider: "openmodel",
-    model: "glm-5.3-flash"
-  });
+  assert.deepEqual(selectPiModelFromMessage("openmodel"), {});
 });
 
 function buildContext(text = "帮我看一下") {
@@ -84,127 +31,52 @@ function buildContext(text = "帮我看一下") {
     cli: "pi" as const,
     workspaceId: "/tmp",
     message: {
-      chatId: "oc_group_1",
-      chatType: "group",
-      messageId: "om_1",
-      senderId: "ou_1",
-      senderName: "user",
-      senderType: "user",
-      text,
-      mentionsBot: false,
-      raw: {}
+      chatId: "oc_group_1", chatType: "group", messageId: "om_1", senderId: "ou_1",
+      senderName: "user", senderType: "user", text, mentionsBot: false, raw: {}
     }
   };
 }
 
-test("buildPiRpcArgs starts pi in RPC server mode with a persisted session", () => {
-  const args = buildPiRpcArgs(
-    {
-      PI_CLI_PROVIDER: "openrouter",
-      PI_CLI_MODEL: "deepseek-flash",
-      PI_CLI_THINKING: "xhigh"
-    },
-    buildContext(),
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
-  );
+const piDefaults = { PI_CLI_PROVIDER: "opencode-go", PI_CLI_MODEL: "deepseek-v4.1-flash", PI_CLI_THINKING: "high" };
+const argValue = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
-  assert.deepEqual(args.slice(0, 5), [
-    "--mode",
-    "rpc",
-    "--session",
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl",
-    "--approve"
-  ]);
-  assert.equal(args.includes("-p"), false);
-  assert.equal(args.includes("--no-session"), false);
-  assert.equal(args[args.indexOf("--provider") + 1], "openrouter");
-  assert.equal(args[args.indexOf("--model") + 1], "deepseek-flash");
-  assert.equal(args[args.indexOf("--thinking") + 1], "xhigh");
+test("Pi RPC starts with OpenCode Go Flash defaults and a persisted session", () => {
+  const args = buildPiRpcArgs(piDefaults, buildContext(), "/tmp/pi-session.jsonl");
+  assert.deepEqual(args.slice(0, 5), ["--mode", "rpc", "--session", "/tmp/pi-session.jsonl", "--approve"]);
+  assert.equal(argValue(args, "--provider"), "opencode-go");
+  assert.equal(argValue(args, "--model"), "deepseek-v4.1-flash");
+  assert.equal(argValue(args, "--thinking"), "high");
 });
 
-test("buildPiRpcArgs routes GLM bindings to the openmodel provider instead of env defaults", () => {
-  const args = buildPiRpcArgs(
-    {
-      PI_CLI_PROVIDER: "deepseek",
-      PI_CLI_MODEL: "deepseek-flash",
-      PI_CLI_THINKING: "xhigh"
-    },
-    {
-      ...buildContext(),
-      provider: undefined,
-      model: "glm-5.3-flash"
-    },
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
-  );
-
-  assert.equal(args[args.indexOf("--provider") + 1], "openmodel");
-  assert.equal(args[args.indexOf("--model") + 1], "glm-5.3-flash");
+test("Pi catalog defaults override retired environment providers", () => {
+  const args = buildPiRpcArgs({ PI_CLI_PROVIDER: "openrouter", PI_CLI_MODEL: "deepseek-flash", PI_CLI_THINKING: "xhigh" }, buildContext(), "/tmp/pi-session.jsonl");
+  assert.equal(argValue(args, "--provider"), "opencode-go");
+  assert.equal(argValue(args, "--model"), "deepseek-v4.1-flash");
+  assert.equal(argValue(args, "--thinking"), "high");
 });
 
-test("buildPiRpcArgs lets DS4 Flash in the message override the default model", () => {
-  const args = buildPiRpcArgs(
-    {
-      PI_CLI_PROVIDER: "openrouter",
-      PI_CLI_MODEL: "glm-5.3-flash",
-      PI_CLI_THINKING: "xhigh"
-    },
-    buildContext("用 ds4 flash 快速改一下"),
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
-  );
-
-  assert.equal(args[args.indexOf("--model") + 1], "deepseek-flash");
+test("Pi permits model selection from ordinary messages while staying on OpenCode Go", () => {
+  const args = buildPiRpcArgs(piDefaults, buildContext("用 GLM 5.3 Flash 写代码"), "/tmp/pi-session.jsonl");
+  assert.equal(argValue(args, "--provider"), "opencode-go");
+  assert.equal(argValue(args, "--model"), "glm-5.3-flash");
 });
 
-test("buildPiRpcArgs maps a deepseek model to the openmodel gateway model id", () => {
-  const args = buildPiRpcArgs(
-    {
-      PI_CLI_PROVIDER: "deepseek",
-      PI_CLI_MODEL: "deepseek-flash",
-      PI_CLI_THINKING: "xhigh"
-    },
-    {
-      ...buildContext(),
-      provider: "openmodel",
-      model: "deepseek-flash"
-    },
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
-  );
-
-  assert.equal(args[args.indexOf("--provider") + 1], "openmodel");
-  assert.equal(args[args.indexOf("--model") + 1], "deepseek-v4.1-flash");
+test("Pi fixed control model wins over model names embedded in the control prompt", () => {
+  const args = buildPiRpcArgs(piDefaults, {
+    ...buildContext("所有模型：GLM 5.3 Flash、DeepSeek V4 Pro、Kimi K3。用户要求切换到 GLM。"),
+    provider: "opencode-go", model: "deepseek-v4.1-flash", thinking: "high"
+  }, "/tmp/pi-control.jsonl");
+  assert.equal(argValue(args, "--provider"), "opencode-go");
+  assert.equal(argValue(args, "--model"), "deepseek-v4.1-flash");
+  assert.equal(argValue(args, "--thinking"), "high");
 });
 
-test("buildPiRpcArgs maps the default deepseek model to openmodel when the binding asks for it", () => {
-  const args = buildPiRpcArgs(
-    {
-      PI_CLI_PROVIDER: "deepseek",
-      PI_CLI_MODEL: "deepseek-flash",
-      PI_CLI_THINKING: "xhigh"
-    },
-    {
-      ...buildContext(),
-      provider: "openmodel"
-    },
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
-  );
-
-  assert.equal(args[args.indexOf("--provider") + 1], "openmodel");
-  assert.equal(args[args.indexOf("--model") + 1], "deepseek-v4.1-flash");
-});
-
-test("buildPiRpcArgs keeps the deepseek provider model id on the deepseek provider", () => {
-  const args = buildPiRpcArgs(
-    {
-      PI_CLI_PROVIDER: "deepseek",
-      PI_CLI_MODEL: "deepseek-flash",
-      PI_CLI_THINKING: "xhigh"
-    },
-    buildContext("用 ds4.1 flash"),
-    "/home/overlogged/.pi/agent/sessions/codex-feishu-bot/oc_group_1/session.jsonl"
-  );
-
-  assert.equal(args[args.indexOf("--provider") + 1], "deepseek");
-  assert.equal(args[args.indexOf("--model") + 1], "deepseek-flash");
+test("Pi accepts the legacy Flash alias but rejects retired provider bindings", () => {
+  const args = buildPiRpcArgs(piDefaults, { ...buildContext(), model: "deepseek-flash" }, "/tmp/pi-session.jsonl");
+  assert.equal(argValue(args, "--model"), "deepseek-v4.1-flash");
+  for (const provider of ["openmodel", "deepseek", "openrouter", "qwen38"]) {
+    assert.throws(() => buildPiRpcArgs(piDefaults, { ...buildContext(), provider }, "/tmp/pi-session.jsonl"), /Pi 未启用供应商/);
+  }
 });
 
 interface FakePiRpcSpawnOptions {

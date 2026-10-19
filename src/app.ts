@@ -1,6 +1,5 @@
 import { getProviderCatalog } from "./services/provider-catalog.js";
 import { getCodexModelCatalog } from "./services/codex-model-catalog.js";
-import { LocalDevinUsageReader } from "./services/devin-usage-reader.js";
 import { DevinAcpWorker } from "./integrations/codex/devin-acp-worker.js";
 import { ClaudeProviderService } from "./services/claude-provider-service.js";
 import { mkdir } from "node:fs/promises";
@@ -17,7 +16,7 @@ import { DshAcpWorker } from "./integrations/codex/dsh-acp-worker.js";
 import { McodeAcpWorker } from "./integrations/codex/mcode-acp-worker.js";
 import { KimiAcpWorker } from "./integrations/codex/kimi-acp-worker.js";
 import { MockCodexWorker } from "./integrations/codex/mock-codex-worker.js";
-import { PiRpcWorker, PI_DS_FLASH_MODEL } from "./integrations/codex/pi-rpc-worker.js";
+import { PiRpcWorker, PI_DS_FLASH_MODEL, PI_OPENCODE_GO_PROVIDER } from "./integrations/codex/pi-rpc-worker.js";
 import { MultiCliWorker } from "./integrations/codex/multi-cli-worker.js";
 import { KimiQuotaClient } from "./integrations/kimi/kimi-quota-client.js";
 import { FakeFeishuMessageClient } from "./integrations/feishu/fake-feishu-message-client.js";
@@ -148,7 +147,9 @@ export function buildAppRuntime(env: Env): AppRuntime {
     env.DEFAULT_WORKSPACE,
     app.log,
     "pi",
-    PI_DS_FLASH_MODEL
+    PI_DS_FLASH_MODEL,
+    PI_OPENCODE_GO_PROVIDER,
+    "high"
   );
   const usageSnapshotStore = new UsageSnapshotStore(env.USAGE_SNAPSHOT_FILE, app.log);
   const usageStatsService = new UsageStatsService(
@@ -156,8 +157,7 @@ export function buildAppRuntime(env: Env): AppRuntime {
     {
       ccusageCommand: env.CCUSAGE_COMMAND,
       cacheMs: env.USAGE_CCUSAGE_CACHE_MS,
-      usdToCnyRate: env.USAGE_USD_TO_CNY_RATE,
-      snapshotIntervalMs: env.USAGE_SNAPSHOT_INTERVAL_MS
+      usdToCnyRate: env.USAGE_USD_TO_CNY_RATE
     },
     app.log,
     undefined,
@@ -165,9 +165,7 @@ export function buildAppRuntime(env: Env): AppRuntime {
       credentialsFile: env.KIMI_CODE_CREDENTIALS_FILE,
       logger: app.log
     }),
-    usageSnapshotStore,
-    new LocalDevinUsageReader({ database: env.DEVIN_USAGE_DATABASE, command: env.DEVIN_ACP_COMMAND,
-      proxy: env.DEVIN_PROXY_URL, cacheMs: env.USAGE_CCUSAGE_CACHE_MS }, app.log)
+    usageSnapshotStore
   );
   const tokenDailyReportService = new TokenDailyReportService(
     sessionStore,
@@ -289,8 +287,6 @@ export function buildAppRuntime(env: Env): AppRuntime {
         },
         "应用启动配置摘要"
       );
-      await usageSnapshotStore.load();
-      usageStatsService.start();
       tokenDailyReportService.start();
       await codexWorker.start?.();
       scheduleService.start((task) => orchestrator.triggerScheduledTask(task));
@@ -347,7 +343,6 @@ export function buildAppRuntime(env: Env): AppRuntime {
     async stopExternalServices() {
       await wsSubscriber?.close();
       tokenDailyReportService.stop();
-      usageStatsService.stop();
       scheduleService.stop();
       await codexWorker.close?.();
       await runtimeStatePersister.flush();

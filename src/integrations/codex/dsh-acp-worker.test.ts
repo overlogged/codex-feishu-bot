@@ -6,8 +6,35 @@ import type { Readable, Writable } from "node:stream";
 import test from "node:test";
 
 import type { CodexEvent, IncomingChatMessage } from "../../domain/types.js";
-import { DshAcpWorker } from "./dsh-acp-worker.js";
+import { DshAcpWorker, dshProcessEnv } from "./dsh-acp-worker.js";
 import type { KimiAcpRuntime } from "./kimi-acp-worker.js";
+import type { CodexTurnContext } from "./codex-worker.js";
+
+const modelValue = (provider: string, model: string) => JSON.stringify([provider, model]);
+function advertisedOptions(selected = modelValue("openmodel", "deepseek-v4.1-flash")): unknown[] {
+  return [
+    { id: "model", category: "model", currentValue: selected, options: [
+      { group: "deepseek-account", options: [
+        { value: modelValue("deepseek-account", "deepseek-flash"), name: "DeepSeek-V4.1-Flash" },
+        { value: modelValue("deepseek-account", "deepseek-v4-pro"), name: "DeepSeek-V4-Pro" }
+      ] },
+      { group: "openmodel", options: [
+        { value: modelValue("openmodel", "deepseek-v4.1-flash"), name: "DeepSeek-V4.1-Flash" }
+      ] },
+      { group: "opencode-go", options: [
+        { value: modelValue("opencode-go", "deepseek-v4.1-flash"), name: "DeepSeek V4.1 Flash" },
+        { value: modelValue("opencode-go", "deepseek-v4-pro"), name: "DeepSeek V4 Pro" },
+        { value: modelValue("opencode-go", "kimi-k3"), name: "Kimi K3" },
+        { value: modelValue("opencode-go", "no-reasoning"), name: "No reasoning" }
+      ] }
+    ] },
+    ...(selected.includes("no-reasoning") ? [] : [
+      { id: "reasoning_effort", category: "thought_level", currentValue: "", options: [
+        { value: "high", name: "High" }, { value: "off", name: "Off" }
+      ] }
+    ])
+  ];
+}
 
 function createFakeDshRuntime(
   fakeOptions: {
@@ -53,6 +80,7 @@ function createFakeDshRuntime(
       };
 
       let buffer = "";
+      let selected = modelValue("openmodel", "deepseek-v4.1-flash");
       stdin.setEncoding("utf8");
       stdin.on("data", (chunk: string) => {
         buffer += chunk;
@@ -72,7 +100,7 @@ function createFakeDshRuntime(
           }
 
           if (message.method === "session/new" && message.id !== undefined) {
-            write({ jsonrpc: "2.0", id: message.id, result: { sessionId: "dsh_session_1" } });
+            write({ jsonrpc: "2.0", id: message.id, result: { sessionId: "dsh_session_1", configOptions: advertisedOptions(selected) } });
             continue;
           }
 
@@ -80,7 +108,9 @@ function createFakeDshRuntime(
             configOptions.push(
               (message as { params?: Record<string, unknown> }).params ?? {}
             );
-            write({ jsonrpc: "2.0", id: message.id, result: { configOptions: [] } });
+            const params = (message as { params?: { configId?: string; value?: string } }).params;
+            if (params?.configId === "model" && params.value) selected = params.value;
+            write({ jsonrpc: "2.0", id: message.id, result: { configOptions: advertisedOptions(selected) } });
             continue;
           }
 
@@ -172,13 +202,14 @@ function buildMessage(): IncomingChatMessage {
   };
 }
 
-async function collectEvents(worker: DshAcpWorker, threadId: string): Promise<CodexEvent[]> {
+async function collectEvents(worker: DshAcpWorker, threadId: string, settings: Partial<CodexTurnContext> = {}): Promise<CodexEvent[]> {
   const events: CodexEvent[] = [];
   for await (const event of worker.runTurn({
     cli: "dsh",
     workspaceId: "/tmp/dsh-workspace",
     message: buildMessage(),
-    threadId
+    threadId,
+    ...settings
   })) {
     events.push(event);
   }
@@ -378,4 +409,56 @@ test("DshAcpWorker steerTurn 对已结束的 turn 报错，交给编排层兜底
   );
 
   await worker.close();
+});
+
+
+test("DSH uses only its dedicated proxy and enables Node fetch proxy support without mutating the parent", () => {
+  const source = { HTTPS_PROXY: "http://unrelated:1", all_proxy: "socks5://unrelated:2", NO_PROXY: "*", NODE_USE_ENV_PROXY: "1", OTHER: "keep" };
+  const proxied = dshProcessEnv(" http://local-proxy:7891 ", source);
+  assert.equal(proxied.HTTPS_PROXY, "http://local-proxy:7891");
+  assert.equal(proxied.http_proxy, proxied.HTTPS_PROXY);
+  assert.equal(proxied.NODE_USE_ENV_PROXY, "1");
+  assert.equal(proxied.NO_PROXY, "localhost,127.0.0.1,::1");
+  assert.equal(proxied.all_proxy, undefined);
+  assert.equal(source.HTTPS_PROXY, "http://unrelated:1");
+  const direct = dshProcessEnv(undefined, source);
+  assert.equal(direct.HTTPS_PROXY, undefined);
+  assert.equal(direct.NODE_USE_ENV_PROXY, undefined);
+  assert.equal(direct.OTHER, "keep");
+});
+
+test("DSH switches account and OpenCode routes in one session, then applies reasoning", async () => {
+  const { runtime, configOptions, spawnOptions } = createFakeDshRuntime();
+  const worker = new DshAcpWorker({ DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp", DSH_ACP_REASONING: "high" }, undefined, runtime);
+  try {
+    await collectEvents(worker, "pending:dsh-acp:selection", { provider: "deepseek-account", model: "deepseek-flash" });
+    await collectEvents(worker, "dsh_session_1", { provider: "opencode-go", model: "deepseek-flash", thinking: "off" });
+    await collectEvents(worker, "dsh_session_1", { provider: "opencode-go", model: "kimi-k3" });
+    assert.equal(spawnOptions.length, 1);
+    assert.deepEqual(configOptions.map(({ configId, value }) => [configId, value]), [
+      ["model", modelValue("deepseek-account", "deepseek-flash")], ["reasoning_effort", "high"],
+      ["model", modelValue("opencode-go", "deepseek-v4.1-flash")], ["reasoning_effort", "off"],
+      ["model", modelValue("opencode-go", "kimi-k3")], ["reasoning_effort", "high"]
+    ]);
+  } finally { await worker.close(); }
+});
+
+test("DSH validates explicit reasoning against the selected model and tolerates unsupported defaults", async () => {
+  const { runtime, configOptions, promptTexts } = createFakeDshRuntime();
+  const worker = new DshAcpWorker({ DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp", DSH_ACP_REASONING: "high" }, undefined, runtime);
+  try {
+    await collectEvents(worker, "pending:dsh-acp:no-reasoning", { provider: "opencode-go", model: "no-reasoning" });
+    assert.deepEqual(configOptions.map(({ configId }) => configId), ["model"]);
+    await assert.rejects(collectEvents(worker, "dsh_session_1", { provider: "opencode-go", model: "no-reasoning", thinking: "high" }), /未提供 thinking/);
+    assert.equal(promptTexts.length, 1);
+  } finally { await worker.close(); }
+});
+
+test("DSH rejects missing routes before sending a prompt", async () => {
+  const { runtime, promptTexts } = createFakeDshRuntime();
+  const worker = new DshAcpWorker({ DSH_ACP_COMMAND: "dsh", DSH_ACP_PROFILE: "acp" }, undefined, runtime);
+  try {
+    await assert.rejects(collectEvents(worker, "pending:dsh-acp:missing", { provider: "deepseek-account", model: "kimi-k3" }), /不支持所选 provider\/模型/);
+    assert.equal(promptTexts.length, 0);
+  } finally { await worker.close(); }
 });

@@ -125,8 +125,8 @@ pnpm host:smoke
 
 - `codex`：连接宿主机 `codex app-server`（WebSocket JSON-RPC）
 - `kimi`：启动 `kimi acp`（Agent Client Protocol，stdio JSON-RPC），按群复用长驻会话
-- `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；活跃 turn 内收到新消息会用 `abort` 打断当前 turn，再用最新消息立即重跑
-- `dsh`：启动 `dsh --profile acp`（DeepSeek Harness 的 ACP v1 stdio 协议），按群复用长驻会话；`ds` / `deepseek` 默认走这个后端，模型/provider 由 `~/.dsh/settings.yaml` 的 profile 配置决定。机器人每轮会显式设置 `session/set_config_option` 的 `reasoning_effort`（`DSH_ACP_REASONING`，默认 `high`）；不设置的话 dsh 默认不开启思考，中间过程不会输出
+- `pi`：启动 `pi --mode rpc`（stdio JSON-RPC server），按群复用长驻进程；仅配置 OpenCode Go 订阅，默认 `deepseek-v4.1-flash` / `high`。活跃 turn 内收到新消息会用 `abort` 打断当前 turn，再用最新消息立即重跑
+- `dsh`：启动 `dsh --profile acp`（DeepSeek Harness 的 ACP v1 stdio 协议），按群复用长驻会话。`ds` / `deepseek` 默认使用 DeepSeek 账号的 Flash；支持按群选择 OpenCode Go 订阅、DeepSeek API 和 OpenModel。模型及别名在 `config/providers.json` 配置，凭据沿用本机 dsh。先切换模型，再设置该模型支持的思考深度（群绑定优先，`DSH_ACP_REASONING` 默认 `high`）。
 - `devin`：启动 `devin acp`，复用本机 Devin 登录和会话；支持过程输出、工具卡片及进程重启后的会话恢复。执行中追加消息按顺序排队，不中断当前任务。
 - `claude`：活跃任务使用 `--input-format stream-json` 持续接收输入，新消息通过原生 steer 注入同一个进程；任务结束后关闭输入，下一轮恢复会话。
 
@@ -155,12 +155,15 @@ Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-6.1-sol` 或 
 - 或 `@机器人 kimi 12`
 - 或 `@机器人 pi 12`
 - 或 `@机器人 pi ds4 flash 12`
-- 或 `@机器人 ds 12`（`ds` / `deepseek` 默认绑定 dsh 后端）
+- 或 `@机器人 ds 12`（默认 DeepSeek 账号 + Flash）
+- 或 `@机器人 dsh DeepSeek 账号 pro 12`
+- 或 `@机器人 dsh opencode flash 12`
+- 或 `@机器人 dsh opencode kimi-k3 12`
 - 或自然语言，例如 `@机器人 把这个群切到 12 号目录`
 
 ### 所有后端的模型与 provider 配置热加载
 
-统一配置文件为 `config/providers.json`，包含 `codex`、`claude`、`kimi`、`pi`、`dsh`、`devin` 六个已接入后端。编辑保存后，下次绑定、控制提示和新任务读取时生效，无需构建或重启机器人。使用 `CHAT_PROVIDER_CONFIG_FILE` 可指定其他路径（更改路径变量需要重启）。配置文件无法创建新的 CLI 协议适配器。
+统一配置文件为 `config/providers.json`，包含 `codex`、`claude`、`kimi`、`pi`、`dsh`、`mcode`、`devin` 七个已接入后端。编辑保存后，下次绑定、控制提示和新任务读取时生效，无需构建或重启机器人。使用 `CHAT_PROVIDER_CONFIG_FILE` 可指定其他路径（更改路径变量需要重启）。配置文件无法创建新的 CLI 协议适配器。
 
 每个 `backends.<cli>` 支持以下字段：
 
@@ -172,9 +175,9 @@ Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-6.1-sol` 或 
 | `defaultModel` | 默认模型，必须引用本段 `models` 中的 ID |
 | `defaultProvider` | 默认供应商，必须引用本段 `providers`；Pi 支持，Kimi/DSH 取决于 ACP 能力 |
 | `defaultThinking` | 默认思考深度；Codex/Pi 支持，Kimi/DSH 取决于 ACP 能力；Claude/Devin 沿用原生行为 |
-| `nativeSettings` | 为 true 时使用 CLI 本机配置，不传 model/provider/thinking；Kimi/DSH 默认开启 |
+| `nativeSettings` | 为 true 时使用 CLI 本机配置，不传 model/provider/thinking；Kimi 默认开启，DSH 默认关闭 |
 
-模型项还可设置 `provider`（固定路由）、`fallbackProvider`（没有指定供应商时的运行时兜底）、`providerModels`（Pi 的 provider → 实际模型 ID 映射）。例如，在 Pi 的 `providers` 中加入 `{"id":"my-gateway","aliases":["我的网关"]}`，并在 `models` 中加入：
+模型项还可设置 `provider`（固定路由）、`fallbackProvider`（没有指定供应商时的运行时兜底）、`providerModels`（Pi/DSH 的 provider → 实际模型 ID 映射）。例如，在 Pi 的 `providers` 中加入 `{"id":"my-gateway","aliases":["我的网关"]}`，并在 `models` 中加入：
 
 ```json
 {
@@ -187,11 +190,44 @@ Codex 默认使用 `gpt-6-astra` 和 `high`；也可以绑定 `gpt-6.1-sol` 或 
 
 之后可用 `@机器人 pi 我的模型 12` 绑定。网关地址和密钥仍须配置在 Pi 原生配置中，这份文件只负责选择和映射。Codex 严格校验模型白名单；其他后端允许未列出的原生模型 ID 交给 CLI 校验。显式群绑定优先于配置默认值，配置默认值优先于 CLI 环境默认值。
 
-Claude 的 `providers` 配置用于 `切换 claude provider <别名>`，运行时会与 CC Switch 实际供应商列表核对，切换仍是全局操作。Claude/Codex/Devin 不支持通过群绑定指定 provider，因此不接受 `defaultProvider` 或模型项 provider 路由。Kimi/DSH 如需显式模型/provider 设置，先设 `nativeSettings: false`，再填写模型和默认值；执行时只会应用 ACP 会话实际提供的配置项，未支持的选项会明确报错。
+Claude 的 `providers` 配置用于 `切换 claude provider <别名>`，运行时会与 CC Switch 实际供应商列表核对，切换仍是全局操作。Claude/Codex/Devin 不支持通过群绑定指定 provider，因此不接受 `defaultProvider` 或模型项 provider 路由。Kimi 如需显式模型/provider 设置，先设 `nativeSettings: false`，再填写模型和默认值；执行时只会应用 ACP 会话实际提供的配置项，未支持的选项会明确报错。
 
 别名忽略大小写，空格和下划线按连字符匹配；同一命名空间中的不同项目不能共用别名。无效配置、缺失文件或未写完的 JSON 会保留上一份有效配置并记录警告，修复后自动恢复；启动时没有有效配置则报错。更新不会改写已保存的显式绑定或打断正在执行的任务；删除 Codex 模型前请先迁移使用它的群绑定。
 
 兼容旧环境变量 `CODEX_BINDING_MODELS_FILE`：显式设置时只覆盖 Codex 模型配置，原 `config/codex-models.json` 仅保留作为旧格式示例；未设置时 Codex 也从统一文件读取。
+
+
+
+## Pi 与 @机器人 控制请求
+
+Pi 的供应商列表仅保留 `opencode-go`，默认模型为 `deepseek-v4.1-flash`，思考档位为 `high`。`dsf4.1`、`ds4.1 flash` 和旧的 `deepseek-flash` 都映射到该模型。也可用 `@机器人 pi kimi-k3 12` 或 `@机器人 pi glm-5.3-flash 12`，仍通过 OpenCode Go 调用；Flash 与 Pro 分开选择。
+
+`@机器人` 的自然语言控制请求固定交给 **Pi + OpenCode Go + DeepSeek V4.1 Flash + high** 解析。即使用户要求把群绑定到其他模型，或控制提示包含完整模型列表，解析模型也保持不变。普通任务有显式群绑定模型时同样优先使用绑定；未指定模型的调用才从消息中匹配模型。
+
+Pi 登录信息保存在 `~/.pi/agent/auth.json` 的 `opencode-go` 项；本机 `settings.json` 的默认 provider/model 应与机器人配置一致。可用 `pi update --models` 刷新订阅模型目录。旧的 OpenModel、DeepSeek API、OpenRouter 或本地模型供应商不再在 Pi 连接配置中启用；旧群绑定需要迁移到 `opencode-go`。运行时会拒绝不在 Pi 配置供应商列表中的路由。
+
+## DSH：DeepSeek 账号与 OpenCode Go
+
+`ds` / `deepseek` 是 dsh 后端的别名。默认绑定 `deepseek-account` / `deepseek-flash`，使用本机已登录的 DeepSeek 账号。修改默认值会影响未保存显式模型/provider 的旧绑定；已经明确指定的群绑定保持原选择。
+
+| 群里发送（12 换成目录编号） | 来源与模型 |
+| --- | --- |
+| `@机器人 ds 12` | DeepSeek 账号，Flash |
+| `@机器人 dsh DeepSeek 账号 pro 12` | DeepSeek 账号，V4 Pro |
+| `@机器人 dsh opencode flash 12` | OpenCode Go，V4.1 Flash |
+| `@机器人 dsh opencode pro 12` | OpenCode Go，V4 Pro |
+| `@机器人 dsh opencode kimi-k3 12` | OpenCode Go，Kimi K3 |
+| `@机器人 dsh opencode glm-5.3 12` | OpenCode Go，GLM 5.3 |
+| `@机器人 dsh opencode minimax-m3 12` | OpenCode Go，MiniMax M3 |
+| `@机器人 dsh openmodel flash 12` | 原 OpenModel 网关，Flash |
+
+`opencode` / `OpenCode Go` 映射到 `opencode-go`，`DeepSeek API` 映射到 `deepseek-official`。可让机器人“列出 dsh 的模型和 provider 选项”，也可在 `config/providers.json` 查看和修改别名。OpenCode 模型是否可调用取决于该订阅实际权限；列表不是额度或权限保证。
+
+运行时从 ACP 返回的 provider 分组中匹配完整模型选项，不会因模型同名而混用账号和订阅。Flash 在 DeepSeek 账号中的 ID 是 `deepseek-flash`，在 OpenCode/OpenModel 中是 `deepseek-v4.1-flash`，适配器自动映射；Pro 使用独立的 `deepseek-v4-pro`。未列入机器人配置的模型也可显式填写 provider 和原生模型 ID，由 ACP 校验。无效或歧义选项会报错，不能悄悄改走其他供应商。
+
+支持在绑定时附加 `high`、`max`、`off` 等思考档位，以所选模型实际支持的选项为准。显式指定不支持的档位会报错；环境默认档位不受支持时记录警告并使用模型默认值。
+
+dsh 的 provider 和凭据仍由本机 dsh 管理；当前版本的 ACP profile 位于 `~/.dsh/profiles/acp/cordis.patch.yml`，不再依赖旧的 `~/.dsh/settings.yaml`。如要完全沿用本机默认设置，可将 DSH 的 `nativeSettings` 设为 `true`，同时清空 `models` 并删除 `defaultModel` / `defaultProvider` / `defaultThinking`。
 
 ## Devin
 
@@ -216,11 +252,9 @@ Claude 的 `providers` 配置用于 `切换 claude provider <别名>`，运行�
 - 私聊机器人发 `额度` / `余量` / `用量` / `token` / `usage` / `quota` / `stats`，或在群里 `@机器人 额度`，即可同步查看额度与用量统计，不会启动任务
 - 群里也可以用自然语言问额度，例如 `@机器人 还剩多少额度`，由群控制 agent 的 `show_quota` 意图返回同一份报告
 - 报告包含 Codex 账号实时额度窗口、Kimi 账号实时额度（读取本机 kimi CLI 登录态，含 k3 等全部模型）、Codex 累计用量、**今日各 CLI 消耗**、**近 1 小时消耗（按用量快照估算）**，以及各 CLI 本月历史用量（后者依赖可选的全局命令 `npm install -g ccusage`，缺失时自动跳过；费用按 `USAGE_USD_TO_CNY_RATE` 折算为人民币）
-- 「近 1 小时消耗」依赖后台定期写入的用量快照（`USAGE_SNAPSHOT_FILE`，默认每 10 分钟一次），机器人启动约 1 小时后即可估算
-
-Devin 用量从本机 `~/.local/share/devin/cli/sessions.db` 只读统计（可通过 `DEVIN_USAGE_DATABASE` 改路径），按推理请求去重，包含输入、输出、缓存读取与缓存写入。统计覆盖本机所有 Devin 会话，不限当前群；今日、本月、近一小时快照及日报均包含 Devin。仅有本机落盘记录的调用才会计入。
-
-Devin 费用使用 `devin models list --format json` 返回的当前模型价格，每小时刷新，按 `USAGE_USD_TO_CNY_RATE` 折算人民币。目录明确标为 Free 的模型按 0 计算；未知模型或价格读取失败且无缓存时显示费用未知，合计会注明已知部分。Claude 缓存写入按 5 分钟缓存的 1.25 倍输入价估算（[Opus 5.5 官方价格](https://www.anthropic.com/claude-opus-5-5)）；CLI 未提供缓存时长，故不作为精确账单。历史用量也按当前价格估算，不等于 Devin Pro 的实际订阅扣费（[Devin 计费说明](https://docs.devin.ai/admin/billing/self-serve)）。读取 SQLite 需要支持 `node:sqlite` 的 Node 版本（当前宿主机为 Node 24）。
+- 用量统计仅在用户查询额度/用量，或已开启的 token 日报到达发送时间时触发。启动和后台定时器不再采集用量；普通聊天、@绑定、查看日报设置不会触发统计。
+- 查询和日报生成时顺带保存快照（`USAGE_SNAPSHOT_FILE`）。「近 1 小时消耗」需要当天 45–75 分钟前的快照，否则显示暂无法估算；不会将数小时前的差值当成一小时用量。
+- CLI 用量统计仅包含 Codex、Claude、Kimi 和 Pi；Devin 不参与报告、合计、快照或日报，也不读取其会话数据库。Devin 聊天后端仍可正常使用。
 
 ### 每日 token 消耗日报
 
@@ -370,3 +404,5 @@ fake Feishu 只提供 HTTP/WS 模拟（`scripts/fake-feishu-server.mjs`），不
 ## License
 
 MIT
+
+DSH 网关需要代理时可设置 `DSH_PROXY_URL`，只传给 DSH 子进程，同时开启 Node fetch 的环境代理支持（已在当前宿主机 Node 24.14 验证）。飞书仍保持直连；修改环境变量后需重启机器人。

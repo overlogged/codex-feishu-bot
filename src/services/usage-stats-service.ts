@@ -1,4 +1,3 @@
-import type { DevinUsageReader } from "./devin-usage-reader.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -29,8 +28,6 @@ export interface UsageStatsServiceConfig {
   ccusageCommand: string;
   cacheMs: number;
   usdToCnyRate: number;
-  /** 记录当日累计用量快照的间隔，用于估算「近 1 小时」消耗。 */
-  snapshotIntervalMs?: number;
 }
 
 export type UsageStatsCommandRunner = (command: string, args: string[]) => Promise<string>;
@@ -64,10 +61,8 @@ interface CcusageDailySummary {
 }
 
 const RECENT_WINDOW_MS = 60 * 60 * 1000;
-const DEFAULT_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
 
 const CCUSAGE_CLIS = ["codex", "claude", "kimi", "pi"] as const;
-const USAGE_CLIS = [...CCUSAGE_CLIS, "devin"] as const;
 
 const execFileAsync = promisify(execFile);
 
@@ -152,8 +147,6 @@ function renderCliLabel(cli: string): string {
       return "Kimi";
     case "pi":
       return "Pi";
-    case "devin":
-      return "Devin";
     case "dsh":
       return "DSH";
     case "mcode":
@@ -342,7 +335,6 @@ export class UsageStatsService {
   private readonly usdToCnyRate: number;
   private readonly commandRunner: UsageStatsCommandRunner;
   private readonly kimiQuotaClient?: KimiQuotaReader;
-  private readonly snapshotIntervalMs: number;
   private ccusageCache:
     | {
         expiresAt: number;
@@ -356,7 +348,6 @@ export class UsageStatsService {
       }
     | undefined;
   private ccusageDailyInflight?: Promise<Map<string, CcusageDailySummary[] | null>>;
-  private snapshotTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly codexWorker: CodexWorker,
@@ -364,34 +355,13 @@ export class UsageStatsService {
     private readonly logger?: LoggerLike,
     commandRunner?: UsageStatsCommandRunner,
     kimiQuotaClient?: KimiQuotaReader,
-    private readonly snapshotStore?: UsageSnapshotStore,
-    private readonly devinUsageReader?: DevinUsageReader
+    private readonly snapshotStore?: UsageSnapshotStore
   ) {
     this.ccusageCommand = config.ccusageCommand;
     this.cacheMs = config.cacheMs;
     this.usdToCnyRate = config.usdToCnyRate;
-    this.snapshotIntervalMs = config.snapshotIntervalMs ?? DEFAULT_SNAPSHOT_INTERVAL_MS;
     this.commandRunner = commandRunner ?? defaultCommandRunner;
     this.kimiQuotaClient = kimiQuotaClient;
-  }
-
-  start(): void {
-    if (!this.snapshotStore || this.snapshotTimer) {
-      return;
-    }
-
-    void this.recordUsageSnapshot();
-    this.snapshotTimer = setInterval(() => {
-      void this.recordUsageSnapshot();
-    }, this.snapshotIntervalMs);
-    this.snapshotTimer.unref?.();
-  }
-
-  stop(): void {
-    if (this.snapshotTimer) {
-      clearInterval(this.snapshotTimer);
-      this.snapshotTimer = undefined;
-    }
   }
 
   async buildReport(): Promise<string> {
@@ -433,6 +403,7 @@ export class UsageStatsService {
   /** 每日 token 消耗日报（只包含当天用量，适合定时推送）。 */
   async buildDailyReport(): Promise<string> {
     const lines = await this.buildTodaySection();
+    await this.recordUsageSnapshot();
     return [
       `Token 消耗日报（${localDateKey()}）`,
       "",
@@ -446,7 +417,6 @@ export class UsageStatsService {
     return [
       `费用说明：ccusage 按公开 API 定价估算，USD 按汇率 ${this.usdToCnyRate} 折算为人民币。`,
       "订阅套餐（Kimi / Codex）的金额是按 API 价格的折算，不等于实际账单；自定义 provider 的价格取自本机 pi 的 models.json，配置为 0 就会显示 0。",
-      "Devin 按本机记录去重统计，使用当前 Devin 模型目录价格估算（含缓存）；Claude 缓存写入按 5 分钟价格估算。不代表 Devin 订阅实际扣费，免费模型按目录显示 0，缺少定价显示未知。",
       "统计范围为本机所有会话，不限当前群；仅供参考。"
     ].join("\n");
   }
@@ -576,7 +546,7 @@ export class UsageStatsService {
     const monthKey = currentMonthKey();
     const lines: string[] = [];
 
-    for (const cli of USAGE_CLIS) {
+    for (const cli of CCUSAGE_CLIS) {
       const months = summaries.get(cli);
       if (!months || months.length === 0) {
         continue;
@@ -614,7 +584,7 @@ export class UsageStatsService {
     let hasCost = false;
     let incompleteCost = false;
 
-    for (const cli of USAGE_CLIS) {
+    for (const cli of CCUSAGE_CLIS) {
       const rows = summaries.get(cli);
       if (!rows) {
         continue;
@@ -667,7 +637,7 @@ export class UsageStatsService {
     const totals: Record<string, UsageSnapshotCliTotals> = {};
     let any = false;
 
-    for (const cli of USAGE_CLIS) {
+    for (const cli of CCUSAGE_CLIS) {
       const rows = summaries.get(cli);
       if (!rows) {
         continue;
@@ -730,11 +700,11 @@ export class UsageStatsService {
       .filter((snapshot) => localDateKey(new Date(snapshot.at)) === today)
       .filter((snapshot) => {
         const at = new Date(snapshot.at).getTime();
-        return Number.isFinite(at) && at <= now - 45 * 60 * 1000;
+        return Number.isFinite(at) && at <= now - 45 * 60 * 1000 && at >= now - 75 * 60 * 1000;
       });
 
     if (candidates.length === 0) {
-      return ["需要累计约 1 小时的运行快照后才能估算，请稍后再试。"];
+      return ["缺少约 1 小时前的用量快照，暂无法估算；快照仅在查询用量或生成日报时记录。"];
     }
 
     const reference = candidates.reduce((best, snapshot) => {
@@ -748,7 +718,7 @@ export class UsageStatsService {
     let knownCost = 0;
     let hasCost = false;
     let missingCost = false;
-    for (const cli of USAGE_CLIS) {
+    for (const cli of CCUSAGE_CLIS) {
       const nowTokens = current[cli]?.tokens ?? null;
       const beforeTokens = reference.totals[cli]?.tokens ?? null;
       if (nowTokens === null || beforeTokens === null) {
@@ -790,7 +760,6 @@ export class UsageStatsService {
           summaries.set(cli, await this.fetchCcusageDaily(cli));
         })
       );
-      if (this.devinUsageReader) summaries.set("devin", await this.devinUsageReader.readDaily());
       this.ccusageDailyCache = {
         expiresAt: Date.now() + this.cacheMs,
         summaries
@@ -838,27 +807,6 @@ export class UsageStatsService {
         summaries.set(cli, await this.fetchCcusageMonthly(cli));
       })
     );
-    if (this.devinUsageReader) {
-      const daily = await this.devinUsageReader.readDaily();
-      const months = new Map<string, CcusageMonthlySummary>();
-      for (const day of daily ?? []) {
-        const key = day.date.slice(0, 7);
-        const month = months.get(key) ?? { month: key, totalTokens: 0, totalCost: 0, topModels: [] };
-        month.totalTokens = (month.totalTokens ?? 0) + day.totalTokens;
-        month.totalCost = month.totalCost === null || day.totalCost === null ? null : month.totalCost + day.totalCost;
-        for (const model of day.topModels) {
-          const previous = month.topModels.find(m => m.modelName === model.modelName);
-          if (!previous) month.topModels.push({ ...model });
-          else {
-            previous.totalTokens = (previous.totalTokens ?? 0) + model.totalTokens;
-            previous.cost = previous.cost === null || model.cost === null ? null : previous.cost + model.cost;
-          }
-        }
-        month.topModels.sort((a,b) => (b.totalTokens ?? 0) - (a.totalTokens ?? 0));
-        months.set(key, month);
-      }
-      summaries.set("devin", daily === null ? null : [...months.values()]);
-    }
     this.ccusageCache = {
       expiresAt: Date.now() + this.cacheMs,
       summaries

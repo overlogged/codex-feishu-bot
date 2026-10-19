@@ -387,7 +387,7 @@ test("UsageStatsService reports when the hourly estimate needs more history", as
   );
 
   const report = await service.buildReport();
-  assert.match(report, /需要累计约 1 小时的运行快照后才能估算/);
+  assert.match(report, /缺少约 1 小时前的用量快照/);
 });
 
 test("UsageStatsService builds a daily token report", async () => {
@@ -424,36 +424,51 @@ test("formatTokenCount renders 亿/万 units", () => {
   assert.equal(formatTokenCount(null), "未知");
 });
 
-test("UsageStatsService includes Devin in daily/monthly reports and keeps unknown costs explicit", async () => {
-  const now = new Date();
-  const date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
-  const service = new UsageStatsService(createWorker(), {ccusageCommand:"ccusage",cacheMs:1000,usdToCnyRate:7},
-    undefined, async (_cmd, args) => {
-      assert.notEqual(args[0], "devin", "Devin must not be sent to ccusage");
-      return JSON.stringify({daily:[],monthly:[]});
-    }, undefined, undefined, { async readDaily() { return [{date,totalTokens:8200,totalCost:0.0286,
-      topModels:[{modelName:"claude-opus-5-5-medium",totalTokens:8200,cost:0.0286}]}]; } });
-  const daily = await service.buildDailyReport();
-  assert.match(daily, /Devin：8200 token，估算费用 ¥0.20/);
-  assert.match(daily, /合计：8200 token，估算费用 ¥0.20/);
-  assert.match(daily, /不代表 Devin 订阅实际扣费/);
+test("usage collection only runs on report requests and ignores legacy Devin snapshots", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: new Date("2026-10-19T12:00:00") });
+  const store = new UsageSnapshotStore();
+  const calls: string[] = [];
+  const service = new UsageStatsService(createWorker(), defaultConfig, createLogger(), async (_command, args) => {
+    assert.ok(["codex", "claude", "kimi", "pi"].includes(args[0] ?? ""));
+    calls.push(args.join(" "));
+    return args[1] === "daily" ? ccusageDailyFixture() : ccusageMonthlyFixture();
+  }, undefined, store);
+
+  t.mock.timers.tick(60 * 60 * 1000);
+  await Promise.resolve();
+  assert.deepEqual(calls, [], "idle service must not collect usage");
+  assert.equal(store.list().length, 0);
+
+  await store.record({ at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), totals: {
+    codex: { tokens: 400_000, cost: 0.4 },
+    devin: { tokens: 900_000_000, cost: 100 }
+  } });
   const report = await service.buildReport();
-  assert.match(report, new RegExp(`Devin（${date.slice(0,7)}）：8200 token，估算费用 ¥0.20`));
+  assert.equal(calls.length, 8);
+  assert.doesNotMatch(report, /Devin/i);
+  assert.match(report, /Codex：60\.0 万 token/);
+  assert.match(report, /合计：400\.0 万 token/);
+  assert.deepEqual(Object.keys(store.list().at(-1)!.totals).sort(), ["claude", "codex", "kimi", "pi"]);
+
+  t.mock.timers.tick(60 * 60 * 1000);
+  await Promise.resolve();
+  assert.equal(calls.length, 8, "cache expiry must not schedule background collection");
+  const daily = await service.buildDailyReport();
+  assert.equal(calls.length, 12, "daily report only collects daily data");
+  assert.doesNotMatch(daily, /Devin/i);
+  assert.equal(store.list().length, 3, "both report types record snapshots on demand");
+  assert.equal(store.list().at(-1)?.totals.devin, undefined);
 });
 
-test("Devin joins hourly snapshots and unknown costs do not appear as free", async () => {
-  const date = new Date();
-  const day = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+test("hourly estimates reject stale snapshots instead of reporting multi-hour usage", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-19T12:00:00") });
   const store = new UsageSnapshotStore();
-  // The existing estimator intentionally does not bridge midnight.
-  if (date.getHours() > 0) await store.record({ at:new Date(Date.now()-3600000).toISOString(), totals:{devin:{tokens:100,cost:1}} });
-  const service = new UsageStatsService(createWorker(), {ccusageCommand:"ccusage",cacheMs:1000,usdToCnyRate:7},
-    undefined, async () => JSON.stringify({ daily:[],monthly:[] }), undefined, store,
-    { async readDaily() { return [{date:day,totalTokens:1000,totalCost:null,topModels:[{modelName:"unknown",totalTokens:1000,cost:null}]}]; } });
+  await store.record({ at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    totals: { codex: { tokens: 400_000, cost: 0.4 } } });
+  const service = new UsageStatsService(createWorker(), defaultConfig, createLogger(), async (_command, args) =>
+    args[1] === "daily" ? ccusageDailyFixture() : ccusageMonthlyFixture(), undefined, store);
+
   const report = await service.buildReport();
-  assert.match(report,/Devin：1000 token，费用未知/);
-  assert.match(report,/合计：1000 token，费用未知/);
-  if (date.getHours() > 0) assert.match(report,/Devin：900 token/);
-  assert.equal(store.list().at(-1)?.totals.devin?.tokens,1000);
-  assert.equal(store.list().at(-1)?.totals.devin?.cost,null);
+  assert.match(report, /缺少约 1 小时前的用量快照/);
+  assert.doesNotMatch(report, /Codex：60\.0 万 token/);
 });

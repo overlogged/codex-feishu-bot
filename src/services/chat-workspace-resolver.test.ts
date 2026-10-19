@@ -346,7 +346,7 @@ test("FileBackedChatWorkspaceResolver binds Codex 6.1 Sol with an explicit think
   assert.equal(persistedBindings.oc_group_1?.thinking, "xhigh");
 });
 
-test("FileBackedChatWorkspaceResolver keeps openmodel for a deepseek model binding", async () => {
+test("FileBackedChatWorkspaceResolver keeps opencode-go for a deepseek model binding", async () => {
   const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
   const workspaceRoot = join(root, "workspace");
   const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
@@ -358,26 +358,26 @@ test("FileBackedChatWorkspaceResolver keeps openmodel for a deepseek model bindi
     chatId: "oc_group_1",
     cli: "pi",
     code: "1",
-    provider: "openmodel",
-    model: "deepseek-flash"
+    provider: "opencode-go",
+    model: "deepseek-v4.1-flash"
   });
 
   assert.equal(result.ok, true);
   if (!result.ok) {
     throw new Error("expected pi binding to succeed");
   }
-  assert.equal(result.provider, "openmodel");
-  assert.equal(result.model, "deepseek-flash");
+  assert.equal(result.provider, "opencode-go");
+  assert.equal(result.model, "deepseek-v4.1-flash");
 
   const persistedBindings = JSON.parse(await readFile(configFilePath, "utf8")) as Record<
     string,
     { provider?: string; model?: string }
   >;
-  assert.equal(persistedBindings.oc_group_1?.provider, "openmodel");
-  assert.equal(persistedBindings.oc_group_1?.model, "deepseek-flash");
+  assert.equal(persistedBindings.oc_group_1?.provider, "opencode-go");
+  assert.equal(persistedBindings.oc_group_1?.model, "deepseek-v4.1-flash");
 });
 
-test("FileBackedChatWorkspaceResolver keeps openmodel for GLM pi bindings", async () => {
+test("FileBackedChatWorkspaceResolver keeps opencode-go for GLM pi bindings", async () => {
   const root = await mkdtemp(join(tmpdir(), "chat-workspace-resolver-"));
   const workspaceRoot = join(root, "workspace");
   const configFilePath = join(workspaceRoot, ".codex-feishu-bot", "chat-workspaces.json");
@@ -396,7 +396,7 @@ test("FileBackedChatWorkspaceResolver keeps openmodel for GLM pi bindings", asyn
   if (!result.ok) {
     throw new Error("expected pi GLM binding to succeed");
   }
-  assert.equal(result.provider, "openmodel");
+  assert.equal(result.provider, "opencode-go");
   assert.equal(result.model, "glm-5.3-flash");
 });
 
@@ -482,9 +482,9 @@ test("FileBackedChatWorkspaceResolver supports pi in host mode", async () => {
     ok: true,
     workspaceId: actualWorkspace,
     cli: "pi",
-    provider: undefined,
-    model: undefined,
-    thinking: undefined
+    provider: "opencode-go",
+    model: "deepseek-v4.1-flash",
+    thinking: "high"
   });
 });
 

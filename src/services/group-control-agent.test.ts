@@ -6,6 +6,7 @@ import test from "node:test";
 
 import type { CodexEvent, IncomingChatMessage } from "../domain/types.js";
 import type { CodexWorker } from "../integrations/codex/codex-worker.js";
+import { buildPiRpcArgs } from "../integrations/codex/pi-rpc-worker.js";
 import { CodexGroupControlAgent } from "./group-control-agent.js";
 
 function createMessage(overrides: Partial<IncomingChatMessage> = {}): IncomingChatMessage {
@@ -421,7 +422,7 @@ test("CodexGroupControlAgent interprets pi bind intent", async () => {
   assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
 });
 
-test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent as V4.1 Flash", async () => {
+test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent with its explicit account and model", async () => {
   const worker: CodexWorker = {
     async ensureThread() {
       return "thread_should_not_be_used";
@@ -430,7 +431,7 @@ test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent as V4.1 Flas
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"deepseek","code":"2","model":"deepseek-flash"}'
+        text: '{"kind":"bind_workspace","cli":"deepseek","code":"2","provider":"deepseek-account","model":"deepseek-v4-pro"}'
       };
     }
   };
@@ -466,14 +467,14 @@ test("CodexGroupControlAgent interprets DeepSeek V4 Pro bind intent as V4.1 Flas
       kind: "bind_workspace",
       cli: "dsh",
       code: "2",
-      provider: undefined,
-      model: undefined,
+      provider: "deepseek-account",
+      model: "deepseek-v4-pro",
       thinking: undefined
     }
   ]);
 });
 
-test("CodexGroupControlAgent interprets GLM flash bind intent as pi with openmodel provider", async () => {
+test("CodexGroupControlAgent interprets GLM flash bind intent as pi with opencode-go provider", async () => {
   const worker: CodexWorker = {
     async ensureThread() {
       return "thread_should_not_be_used";
@@ -482,7 +483,7 @@ test("CodexGroupControlAgent interprets GLM flash bind intent as pi with openmod
       yield {
         kind: "assistant_message_completed",
         itemId: "final_1",
-        text: '{"kind":"bind_workspace","cli":"glm","code":"2","provider":"openmodel","model":"glm-5.3-flash"}'
+        text: '{"kind":"bind_workspace","cli":"glm","code":"2","provider":"opencode-go","model":"glm-5.3-flash"}'
       };
     }
   };
@@ -490,7 +491,7 @@ test("CodexGroupControlAgent interprets GLM flash bind intent as pi with openmod
   const agent = new CodexGroupControlAgent(worker, "/home/overlogged");
   const result = await agent.interpret(
     createMessage({
-      text: "@托帕 把这个群绑定到 openmodel 的 GLM 5.3 Flash 的 Quant"
+      text: "@托帕 把这个群绑定到 opencode-go 的 GLM 5.3 Flash 的 Quant"
     }),
     {
       catalog: [
@@ -518,7 +519,7 @@ test("CodexGroupControlAgent interprets GLM flash bind intent as pi with openmod
       kind: "bind_workspace",
       cli: "pi",
       code: "2",
-      provider: "openmodel",
+      provider: "opencode-go",
       model: "glm-5.3-flash",
       thinking: undefined
     }
@@ -803,4 +804,29 @@ test("CodexGroupControlAgent interprets devin bind intent", async () => {
     }
   ]);
   assert.match(result.threadId, /^pending:group-control:oc_group_1:/);
+});
+
+
+test("group controller pins OpenCode Go Flash even when asked to bind another model", async () => {
+  const worker: CodexWorker = {
+    async ensureThread() { return "unused"; },
+    async *runTurn(context) {
+      assert.equal(context.cli, "pi");
+      assert.equal(context.provider, "opencode-go");
+      assert.equal(context.model, "deepseek-v4.1-flash");
+      assert.equal(context.thinking, "high");
+      const args = buildPiRpcArgs({ PI_CLI_PROVIDER: "deepseek", PI_CLI_MODEL: "old", PI_CLI_THINKING: "xhigh" }, context, "/tmp/control.jsonl");
+      assert.equal(args[args.indexOf("--provider") + 1], "opencode-go");
+      assert.equal(args[args.indexOf("--model") + 1], "deepseek-v4.1-flash");
+      assert.equal(args[args.indexOf("--thinking") + 1], "high");
+      yield { kind: "assistant_message_completed", itemId: "final", text: '{"kind":"bind_workspace","cli":"pi","code":"1","provider":"opencode-go","model":"glm-5.3-flash"}' };
+    }
+  };
+  const agent = new CodexGroupControlAgent(worker, "/home/overlogged", undefined, "pi", "deepseek-v4.1-flash", "opencode-go", "high");
+  const result = await agent.interpret(createMessage({ text: "@机器人 pi GLM 5.3 Flash 1" }), {
+    catalog: [{ code: "1", workspace: "test", workspaceId: "/home/overlogged/test" }],
+    scheduledTasks: [], currentBinding: { configured: false, detail: "未绑定" }
+  });
+  assert.equal(result.intents[0]?.kind, "bind_workspace");
+  assert.equal(result.intents[0]?.kind === "bind_workspace" && result.intents[0].model, "glm-5.3-flash");
 });
